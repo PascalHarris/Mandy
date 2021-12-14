@@ -1,0 +1,1 @@
+/***** * mwMenus.h * *		Public interfaces for mwMenus.h * ****/void AdjustMenus(void); void HandleMenu (long mSelect);void SetUpMenus(void);
