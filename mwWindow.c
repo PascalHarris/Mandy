@@ -6,10 +6,13 @@
  *****/
 #include <math.h>
 #include <stdio.h>
+#include <QDOffscreen.h>
 #include "mwWindow.h"
 #ifndef _Quickdraw_
 #include <Quickdraw.h>
 #endif
+
+extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
 
 #define windowX 0
 #define windowY 40
@@ -21,21 +24,24 @@
    kBlockGridTargetColumns: the coarsest pass aims for about this many
    blocks across the longer side of the image (rounded down to a power
    of two), which is what gives a 512-wide window 4 columns.
-   kFinestBlockSize: the pass at which refinement stops - matches the
-   2x2 granularity the original code sampled at.
+   The finest pass size is NOT a fixed constant - see
+   CurrentFinestBlockSize() - because it differs between colour and
+   monochrome (colour refines all the way to real pixels; monochrome
+   stops one level short, at 2x2, to leave room for a dither pattern
+   simulating colour on a 1-bit screen).
    kBlocksPerIdleSlice: how many blocks AdvanceFractalRender() draws
    before yielding back to the event loop. Smaller keeps the app
    checking for input more often (smoother, more responsive); larger
    finishes a render sooner but leaves longer gaps between input
    checks. Worth retuning once this can be timed on real hardware. */
 #define kBlockGridTargetColumns	4
-#define kFinestBlockSize		2
 #define kBlocksPerIdleSlice		4
 
 /* Escape-time fractal parameters. kShadingScale is the common range
    both SampleMandelbrot() and SampleJulia() report on, so ShadeBlock()
-   can use one fixed set of thresholds regardless of which fractal's
-   own maxIterations produced the value. */
+   can use one fixed set of thresholds (monochrome) or one fixed colour
+   ramp (colour) regardless of which fractal's own maxIterations
+   produced the value. */
 #define kShadingScale			64
 
 #define kMandelbrotZoom			150.0
@@ -65,22 +71,35 @@ int			width = 5;
 
 /* Offscreen pixel store --------------------------------------------
    The progressive renderer draws into this buffer; DrawContent() then
-   just copies finished pixels onto the screen. This is the classic
-   (pre-Color QuickDraw) offscreen-bitmap technique - a plain BitMap
-   with a manually allocated baseAddr/rowBytes, wrapped in an ordinary
-   GrafPort - so it works unmodified on the original 512K Mac too,
-   though the progressive renderer below is really aimed at making a
-   Mac Plus-class machine feel responsive rather than a 512K one.
-   A GWorld-based equivalent for colour Macs is separate work. */
-static GrafPort	offscreenPort;
-static BitMap	offscreenBits;
-static Rect		offscreenBounds;
-static Boolean	offscreenReady = false;
+   just copies finished pixels onto the screen. Two different
+   technologies back it depending on gHasColorQD:
+   
+   - Monochrome: a plain BitMap with a manually allocated
+     baseAddr/rowBytes, wrapped in an ordinary GrafPort. This is the
+     classic pre-Color QuickDraw offscreen-bitmap technique, so it
+     works unmodified on real Mac Plus hardware.
+   - Colour: an 8-bit indexed GWorld with a small custom colour table
+     (see BuildFractalColorTable()) built to hold a smooth ramp across
+     kShadingScale. 8-bit indexed, rather than matching the screen's
+     actual depth, is deliberate: CopyBits() automatically dithers
+     this down to whatever the real screen supports (4-bit and up),
+     and an indexed image is what a future palette-cycling animation
+     (the "trippy" effect on the roadmap) needs to rewrite cheaply.
+   
+   Only one of offscreenPort/offscreenBits or offscreenGWorld is ever
+   live at a time, selected by gHasColorQD; offscreenBounds and
+   offscreenReady describe whichever one is current. */
+static GrafPort		offscreenPort;
+static BitMap		offscreenBits;
+static GWorldPtr	offscreenGWorld;
+static Rect			offscreenBounds;
+static Boolean		offscreenReady = false;
 
 /* A fractal sample function reports how "escaped" the point at (x,y)
    is, on the shared kShadingScale range - see SampleMandelbrot() and
    SampleJulia(). */
 typedef short (*FractalSampleProc)(short x, short y);
+
 
 /* Progressive render job -------------------------------------------
    Tracks an in-progress coarse-to-fine render so AdvanceFractalRender()
@@ -97,32 +116,73 @@ static struct {
 	short				nextRow;
 } fractalRenderJob;
 
-static Boolean	AllocateOffscreenStore(void);
-static void		DisposeOffscreenStore(void);
-static short	IterateEscapeTime(double zRe, double zIm, double cRe, double cIm, short maxIterations);
-static short	SampleMandelbrot(short x, short y);
-static short	SampleJulia(short x, short y);
-static void		ShadeBlock(const Rect *blockRect, short shadeLevel);
-static void		DrawFractalDirectly(void);
-static short	BlocksAcross(short span, short blockSize);
-static short	HighestPowerOfTwoAtMost(short n);
-static void		BeginRendering(void);
-static void		EndRendering(void);
-static void		StartProgressiveRender(FractalSampleProc sampleProc);
-static void		DrawNextBlockAndAdvance(void);
-static void		AdvanceToNextBlock(void);
-static void		BeginNextPass(void);
-static void		BlitOffscreenToWindow(void);
+static void			BeginRendering(void);
+static void			EndRendering(void);
+static short		IterateEscapeTime(double zRe, double zIm, double cRe, double cIm, short maxIterations);
+static short		SampleMandelbrot(short x, short y);
+static short		SampleJulia(short x, short y);
+static RGBColor		ColorForShadeLevel(short shadeLevel);
+static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
+static CTabHandle	BuildFractalColorTable(short entryCount);
+static short		CurrentFinestBlockSize(void);
+static void			ShadeBlock(const Rect *blockRect, short shadeLevel);
+static void			DrawFractalDirectly(void);
+static short		BlocksAcross(short span, short blockSize);
+static short		HighestPowerOfTwoAtMost(short n);
+static Boolean		AllocateOffscreenMonoStore(void);
+static Boolean		AllocateOffscreenColorStore(void);
+static Boolean		AllocateOffscreenStore(void);
+static void			DisposeOffscreenStore(void);
+static void			StartProgressiveRender(FractalSampleProc sampleProc);
+static void			DrawNextBlockAndAdvance(void);
+static void			AdvanceToNextBlock(void);
+static void			BeginNextPass(void);
+static void			EnterOffscreenPort(void);
+static void			EnterWindowPort(void);
+static void			BlitOffscreenToWindow(void);
+static void			Checkpoint(short n);	/* TEMPORARY DIAGNOSTIC - see SetUpWindow()/RenderFractalOffscreen() */
+
+/* Checkpoint()
+   TEMPORARY DIAGNOSTIC. Draws a small black square at a position that
+   depends only on n, using nothing but SetPort()/FillRect()/black -
+   the same primitives already proven safe elsewhere - so this can't
+   plausibly be the thing that crashes. Call it at a numbered sequence
+   of points; whichever square is the last one drawn tells us exactly
+   how far execution got. Remove every call to this, and this function
+   itself, once that's answered. */
+static void Checkpoint(short n) {
+	Rect r;
+	
+	SetPort(mwWindow);
+	SetRect(&r, 10 + n * 20, 10, 10 + n * 20 + 15, 25);
+	FillRect(&r, black);
+}
 
 /* SetUpWindow()
-   Create the Minimum Window window, and open it. */
+   Create the Minimum Window window, and open it - a colour window via
+   NewCWindow() when Color QuickDraw is present, a plain monochrome one
+   via NewWindow() otherwise. Either way it's stored in the same
+   WindowPtr: CWindowRecord begins with a WindowRecord, so everything
+   elsewhere that reads windowKind/visible/portRect through mwWindow
+   (including all of mwMenus.c) works unchanged regardless of which
+   kind this actually is. */
 void SetUpWindow(void) {
     dragRect = screenBits.bounds;
     
-    mwWindow = NewWindow(0L, &windowBounds, kIdleWindowTitle, true, noGrowDocProc, (WindowPtr) -1L, true, 0);
+    if (gHasColorQD)
+        mwWindow = NewCWindow(0L, &windowBounds, kIdleWindowTitle, true, noGrowDocProc, (WindowPtr) -1L, true, 0);
+    else
+        mwWindow = NewWindow(0L, &windowBounds, kIdleWindowTitle, true, noGrowDocProc, (WindowPtr) -1L, true, 0);
+    
+    Checkpoint(0);	/* TEMPORARY DIAGNOSTIC: window created */
+    
     SetPort(mwWindow);
     
+    Checkpoint(1);	/* TEMPORARY DIAGNOSTIC: about to call RenderFractalOffscreen() */
+    
     RenderFractalOffscreen();
+    
+    Checkpoint(9);	/* TEMPORARY DIAGNOSTIC: RenderFractalOffscreen() returned */
 }
 
 void DrawBranch(float x1, float y1, float angle, float depth) {
@@ -195,14 +255,108 @@ static short SampleJulia(short x, short y) {
 	return (short) (((long) iterationCount * kShadingScale) / kJuliaMaxIterations);
 }
 
+/* The colour ramp shadeLevel is mapped onto, in the same direction as
+   the monochrome buckets below: 0 (fast escape) is light,
+   kShadingScale (slow escape, or never) is dark. The specific stops -
+   white through yellow/orange/red-purple to black - are an arbitrary
+   starting aesthetic, easy to change; they're also exactly what a
+   future palette-cycling animation would rewrite. */
+typedef struct {
+	short		shadeLevel;
+	RGBColor	color;
+} ColorRampStop;
+
+static const ColorRampStop kColorRamp[] = {
+	{ 0,                        { 65535, 65535, 65535 } },	/* white  */
+	{ kShadingScale / 4,        { 65535, 65535, 0     } },	/* yellow */
+	{ kShadingScale / 2,        { 65535, 16384, 0     } },	/* orange */
+	{ (kShadingScale * 3) / 4,  { 32768, 0,     16384 } },	/* red-purple */
+	{ kShadingScale,            { 0,     0,     0     } }	/* black  */
+};
+#define kColorRampStopCount 5
+
+/* InterpolateComponent()
+   Linear blend of one RGBColor component between two ramp stops. */
+static unsigned short InterpolateComponent(unsigned short from, unsigned short to, double fraction) {
+	return (unsigned short) (from + (to - from) * fraction);
+}
+
+/* ColorForShadeLevel()
+   Finds the pair of ramp stops shadeLevel falls between and linearly
+   blends their colours. */
+static RGBColor ColorForShadeLevel(short shadeLevel) {
+	short i;
+	
+	for (i = 1; i < kColorRampStopCount; i++) {
+		if (shadeLevel <= kColorRamp[i].shadeLevel) {
+			short  rangeStart = kColorRamp[i-1].shadeLevel;
+			short  rangeEnd   = kColorRamp[i].shadeLevel;
+			double fraction   = (rangeEnd > rangeStart) ? (double) (shadeLevel - rangeStart) / (rangeEnd - rangeStart) : 0.0;
+			RGBColor result;
+			
+			result.red   = InterpolateComponent(kColorRamp[i-1].color.red,   kColorRamp[i].color.red,   fraction);
+			result.green = InterpolateComponent(kColorRamp[i-1].color.green, kColorRamp[i].color.green, fraction);
+			result.blue  = InterpolateComponent(kColorRamp[i-1].color.blue,  kColorRamp[i].color.blue,  fraction);
+			return result;
+		}
+	}
+	
+	return kColorRamp[kColorRampStopCount - 1].color;
+}
+
+/* BuildFractalColorTable()
+   Hand-builds a ColorTable of entryCount entries (a Handle sized for
+   ColorTable's trailing variable-length ctTable array), one per
+   possible shadeLevel, so the offscreen GWorld's CLUT is our own
+   fractal ramp rather than the system default. The caller owns the
+   returned handle; NewGWorld() copies what it needs from it rather
+   than keeping it, so it should be disposed (via DisposeCTable())
+   once passed to NewGWorld(). Returns NULL on low memory. */
+static CTabHandle BuildFractalColorTable(short entryCount) {
+	long		tableSize  = sizeof(ColorTable) + (long) (entryCount - 1) * sizeof(ColorSpec);
+	CTabHandle	colorTable = (CTabHandle) NewHandle(tableSize);
+	short		i;
+	
+	if (colorTable == NULL)
+		return NULL;
+	
+	(**colorTable).ctSeed  = GetCTSeed();
+	(**colorTable).ctFlags = 0;
+	(**colorTable).ctSize  = entryCount - 1;
+	
+	for (i = 0; i < entryCount; i++) {
+		(**colorTable).ctTable[i].value = i;
+		(**colorTable).ctTable[i].rgb   = ColorForShadeLevel(i);
+	}
+	
+	return colorTable;
+}
+
+/* CurrentFinestBlockSize()
+   Colour refines all the way to real 1x1 pixels. Monochrome stops one
+   level short, at 2x2, leaving room for a dither pattern to simulate
+   colour on a 1-bit screen at the finest visible unit - the same 2x2
+   granularity the original hand-written Mandelbrot()/Julia() sampled
+   at, now generalised to every block size via ShadeBlock(). */
+static short CurrentFinestBlockSize(void) {
+	return gHasColorQD ? 1 : 2;
+}
+
 /* ShadeBlock()
-   Fills a block with one of QuickDraw's standard dither patterns
-   according to how far up the shared kShadingScale its sample fell.
-   These patterns tile correctly across arbitrary pixel boundaries, so
-   this same call works whether blockRect is a whole coarse-pass block
-   or a single finest-pass cell - one shading routine for every
-   resolution the progressive renderer draws at. */
+   Colours a block according to how far up the shared kShadingScale its
+   sample fell. In colour, that's a real colour from the fractal ramp,
+   solid-filled with PaintRect() - correct whether blockRect is a whole
+   coarse-pass block or a single finest-pass pixel, so this one routine
+   still serves every resolution. In monochrome, it's one of QuickDraw's
+   standard dither patterns via FillRect(), exactly as before. */
 static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
+	if (gHasColorQD) {
+		RGBColor color = ColorForShadeLevel(shadeLevel);
+		RGBForeColor(&color);
+		PaintRect(blockRect);
+		return;
+	}
+	
 	if (shadeLevel > 32)
 		FillRect(blockRect, black);
 	else if (shadeLevel > 24)
@@ -220,7 +374,10 @@ static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
    resolution, with no progress shown along the way. This is only used
    when there's no offscreen store to render into (see DrawContent()) -
    a rare, already-degraded situation where keeping the fallback simple
-   matters more than keeping it responsive. */
+   matters more than keeping it responsive. Works in colour or
+   monochrome exactly like the progressive path, since it shares
+   ShadeBlock() and just steps by CurrentFinestBlockSize() instead of
+   working through a job. */
 static void DrawFractalDirectly(void) {
 	EraseRect(&imageStart);
 	
@@ -228,13 +385,14 @@ static void DrawFractalDirectly(void) {
 		DrawBranch(windowWidth/2, 0, 90, 9);
 	} else if (width == 2 || width == 3) {
 		FractalSampleProc sampleProc = (width == 2) ? SampleMandelbrot : SampleJulia;
+		short step = CurrentFinestBlockSize();
 		short x, y;
 		
-		for (y = 0; y < windowHeight; y += kFinestBlockSize) {
-			for (x = 0; x < windowWidth; x += kFinestBlockSize) {
+		for (y = 0; y < windowHeight; y += step) {
+			for (x = 0; x < windowWidth; x += step) {
 				Rect cell;
-				SetRect(&cell, x, y, x + kFinestBlockSize, y + kFinestBlockSize);
-				ShadeBlock(&cell, sampleProc(x + kFinestBlockSize/2, y + kFinestBlockSize/2));
+				SetRect(&cell, x, y, x + step, y + step);
+				ShadeBlock(&cell, sampleProc(x + step/2, y + step/2));
 			}
 		}
 	}
@@ -249,7 +407,8 @@ static short BlocksAcross(short span, short blockSize) {
 
 /* HighestPowerOfTwoAtMost()
    The largest power of two that doesn't exceed n. Used to pick a
-   starting block size that's clean to halve down to kFinestBlockSize. */
+   starting block size that's clean to halve down to whichever finest
+   size CurrentFinestBlockSize() reports. */
 static short HighestPowerOfTwoAtMost(short n) {
 	short powerOfTwo = 1;
 	
@@ -259,13 +418,12 @@ static short HighestPowerOfTwoAtMost(short n) {
 	return powerOfTwo;
 }
 
-/* AllocateOffscreenStore()
-   Manually allocates a plain (non-colour) BitMap the size of
-   imageStart and wraps it in a GrafPort so QuickDraw can target it
-   directly. Returns false if there isn't enough memory to allocate it;
-   callers must be able to cope with that by drawing straight to the
-   window instead. */
-static Boolean AllocateOffscreenStore(void) {
+/* AllocateOffscreenMonoStore()
+   Manually allocates a plain BitMap the size of imageStart and wraps
+   it in a GrafPort so QuickDraw can target it directly - the classic
+   pre-Color QuickDraw offscreen-bitmap technique, unchanged from
+   before this file supported colour. */
+static Boolean AllocateOffscreenMonoStore(void) {
     short	storeWidth  = imageStart.right  - imageStart.left;
     short	storeHeight = imageStart.bottom - imageStart.top;
     long	storeRowBytes = ((long) (storeWidth + 15) / 16) * 2;
@@ -274,33 +432,85 @@ static Boolean AllocateOffscreenStore(void) {
     if (storeBaseAddr == NULL)
         return false;
     
-    offscreenBounds = imageStart;
     offscreenBits.baseAddr = storeBaseAddr;
     offscreenBits.rowBytes = storeRowBytes;
-    offscreenBits.bounds   = offscreenBounds;
+    offscreenBits.bounds   = imageStart;
     
     OpenPort(&offscreenPort);
     SetPort(&offscreenPort);
     SetPortBits(&offscreenBits);
-    offscreenPort.portRect = offscreenBounds;
-    RectRgn(offscreenPort.visRgn, &offscreenBounds);
-    ClipRect(&offscreenBounds);
+    offscreenPort.portRect = imageStart;
+    RectRgn(offscreenPort.visRgn, &imageStart);
+    ClipRect(&imageStart);
     
-    offscreenReady = true;
     return true;
 }
 
+/* AllocateOffscreenColorStore()
+   Creates an 8-bit indexed GWorld the size of imageStart, using our
+   own fractal colour ramp rather than the system's default CLUT. The
+   pixels are locked for the GWorld's whole lifetime (see
+   DisposeOffscreenStore()) rather than around each individual draw,
+   since it's small (well under 512K's headroom even though colour
+   Macs never actually run this tight on memory) and locking once is
+   one less thing to get wrong at every call site. */
+static Boolean AllocateOffscreenColorStore(void) {
+	CTabHandle	fractalColors = BuildFractalColorTable(kShadingScale + 1);
+	QDErr		error;
+	
+	if (fractalColors == NULL)
+		return false;
+	
+	Checkpoint(5);	/* TEMPORARY DIAGNOSTIC: colour table built */
+	
+	error = NewGWorld(&offscreenGWorld, 8, &imageStart, fractalColors, NULL, 0);
+	DisposeCTable(fractalColors);	/* NewGWorld() copies what it needs, per Inside Mac - see chat */
+	
+	Checkpoint(6);	/* TEMPORARY DIAGNOSTIC: NewGWorld() + DisposeCTable() returned */
+	
+	if (error != noErr)
+		return false;
+	
+	if (!LockPixels(((CGrafPtr) offscreenGWorld)->portPixMap)) {
+		DisposeGWorld(offscreenGWorld);
+		return false;
+	}
+	
+	Checkpoint(7);	/* TEMPORARY DIAGNOSTIC: pixels locked */
+	
+	return true;
+}
+
+/* AllocateOffscreenStore()
+   Picks monochrome or colour storage and, on success, records the
+   bounds every caller shares regardless of which technology backed it. */
+static Boolean AllocateOffscreenStore(void) {
+	if (!(gHasColorQD ? AllocateOffscreenColorStore() : AllocateOffscreenMonoStore()))
+		return false;
+	
+	offscreenBounds = imageStart;
+	offscreenReady  = true;
+	return true;
+}
+
 /* DisposeOffscreenStore()
-   Frees the offscreen buffer so it can be reallocated at a new size
-   (see HandleWindowResized()). Safe to call when nothing is
-   currently allocated. */
+   Frees whichever offscreen store is currently allocated so it can be
+   reallocated at a new size (see HandleWindowResized()). Safe to call
+   when nothing is currently allocated. */
 static void DisposeOffscreenStore(void) {
     if (!offscreenReady)
         return;
     
-    ClosePort(&offscreenPort);
-    DisposePtr(offscreenBits.baseAddr);
-    offscreenBits.baseAddr = NULL;
+    if (gHasColorQD) {
+        UnlockPixels(((CGrafPtr) offscreenGWorld)->portPixMap);
+        DisposeGWorld(offscreenGWorld);
+        offscreenGWorld = NULL;
+    } else {
+        ClosePort(&offscreenPort);
+        DisposePtr(offscreenBits.baseAddr);
+        offscreenBits.baseAddr = NULL;
+    }
+    
     offscreenReady = false;
 }
 
@@ -328,11 +538,12 @@ static void StartProgressiveRender(FractalSampleProc sampleProc) {
 	short imageWidth  = offscreenBounds.right  - offscreenBounds.left;
 	short imageHeight = offscreenBounds.bottom - offscreenBounds.top;
 	short longerSide  = (imageHeight > imageWidth) ? imageHeight : imageWidth;
+	short finestSize  = CurrentFinestBlockSize();
 	
 	fractalRenderJob.sampleProc = sampleProc;
 	fractalRenderJob.blockSize  = HighestPowerOfTwoAtMost(longerSide / kBlockGridTargetColumns);
-	if (fractalRenderJob.blockSize < kFinestBlockSize)
-		fractalRenderJob.blockSize = kFinestBlockSize;
+	if (fractalRenderJob.blockSize < finestSize)
+		fractalRenderJob.blockSize = finestSize;
 	
 	fractalRenderJob.columnCount = BlocksAcross(imageWidth,  fractalRenderJob.blockSize);
 	fractalRenderJob.rowCount    = BlocksAcross(imageHeight, fractalRenderJob.blockSize);
@@ -378,10 +589,10 @@ static void AdvanceToNextBlock(void) {
 
 /* BeginNextPass()
    Halves the block size and rebuilds the grid for the next, finer
-   pass - or marks the job finished once blocks are already at
-   kFinestBlockSize. */
+   pass - or marks the job finished once blocks are already as fine as
+   CurrentFinestBlockSize() allows. */
 static void BeginNextPass(void) {
-	if (fractalRenderJob.blockSize <= kFinestBlockSize) {
+	if (fractalRenderJob.blockSize <= CurrentFinestBlockSize()) {
 		EndRendering();
 		return;
 	}
@@ -393,16 +604,49 @@ static void BeginNextPass(void) {
 	fractalRenderJob.nextRow     = 0;
 }
 
+/* EnterOffscreenPort()/EnterWindowPort()
+   Makes the offscreen store, or the window, the current port, via
+   plain SetPort() in both colour and monochrome. Color QuickDraw
+   drawing normally depends on the current GDevice as well as the
+   current port, which is what SetGWorld()/GetGWorld() are for - but
+   on real testing, SetGWorld(offscreenGWorld, NULL) itself reliably
+   crashed even though NewGWorld()/LockPixels() on that same GWorld
+   worked fine moments earlier, so GetGWorld()/SetGWorld() are avoided
+   here entirely rather than chased further. Nothing here should
+   actually need GDevice-tracking: RGBForeColor()/PaintRect() only
+   ever target the offscreen GWorld, which carries its own colour
+   table, and the window only ever receives a plain CopyBits(). If
+   colours come out wrong once this is drawing again, that assumption
+   is the first thing to revisit. */
+static void EnterOffscreenPort(void) {
+	SetPort(gHasColorQD ? (GrafPtr) offscreenGWorld : &offscreenPort);
+}
+
+static void EnterWindowPort(void) {
+	SetPort(mwWindow);
+}
+
 /* BlitOffscreenToWindow()
    Copies the offscreen store onto the window. Assumes the caller has
-   already made mwWindow the current port (both DrawContent() and
-   AdvanceFractalRender() do this themselves, since each needs the port
-   set for its own reasons too). */
+   already called EnterWindowPort() (both DrawContent() and
+   AdvanceFractalRender() do this themselves, since each needs the
+   port/device set for its own reasons too).
+   
+   &mwWindow->portBits works as the destination in both colour and
+   monochrome without an explicit branch: mwWindow's C type has always
+   been WindowPtr (= GrafPtr), and Inside Macintosh documents coercing
+   a CGrafPtr to a GrafPtr and reading .portBits as the correct,
+   intentional way to get a CopyBits-compatible pointer from a colour
+   port - QuickDraw recognises it's really a PixMap by the high bits
+   left set at that offset. The source needs the explicit branch since
+   it's one of two genuinely different backing stores. */
 static void BlitOffscreenToWindow(void) {
+    BitMap *sourceBits = gHasColorQD ? &((GrafPtr) offscreenGWorld)->portBits : &offscreenBits;
+    
     if (!((WindowPeek) mwWindow)->visible)
         return;
     
-    CopyBits(&offscreenBits, &mwWindow->portBits, &offscreenBounds, &imageStart, srcCopy, NULL);
+    CopyBits(sourceBits, &mwWindow->portBits, &offscreenBounds, &imageStart, srcCopy, NULL);
 }
 
 /* RenderFractalOffscreen()
@@ -424,14 +668,23 @@ void RenderFractalOffscreen(void) {
     
     GetPort(&savedPort);
     
+    Checkpoint(2);	/* TEMPORARY DIAGNOSTIC: entered RenderFractalOffscreen, port saved */
+    
     if (!offscreenReady && !AllocateOffscreenStore()) {
         EndRendering();
         SetPort(savedPort);
         return;
     }
     
-    SetPort(&offscreenPort);
+    Checkpoint(3);	/* TEMPORARY DIAGNOSTIC: offscreen store ready */
+    
+    EnterOffscreenPort();
+    
+    Checkpoint(8);	/* TEMPORARY DIAGNOSTIC: offscreen port entered */
+    
     EraseRect(&offscreenBounds);
+    
+    Checkpoint(4);	/* TEMPORARY DIAGNOSTIC: offscreen port erased */
     
 	if (width == 1) {
 		DrawBranch(windowWidth/2, 0, 90, 9);
@@ -462,11 +715,11 @@ void AdvanceFractalRender(void) {
     
     GetPort(&savedPort);
     
-    SetPort(&offscreenPort);
+    EnterOffscreenPort();
     while (fractalRenderJob.active && blocksRemaining-- > 0)
         DrawNextBlockAndAdvance();
     
-    SetPort(mwWindow);
+    EnterWindowPort();
     BlitOffscreenToWindow();
     
     SetPort(savedPort);
@@ -514,7 +767,7 @@ void HandleWindowResized(void) {
    this falls back to computing the fractal directly into the window,
    in one blocking pass, on every update. */
 void DrawContent(short active) {
-    SetPort(mwWindow);
+    EnterWindowPort();
     
     if (offscreenReady)
         BlitOffscreenToWindow();

@@ -8,13 +8,17 @@
 
 #include "mwMenus.h"
 #include "mwWindow.h"
+#include <GestaltEqu.h>
 
 extern	WindowPtr	mwWindow;
 extern	Rect		dragRect;
 
+Boolean	gHasColorQD;
+
 void InitMacintosh(void);
 void HandleMouseDown (EventRecord	*theEvent);
 void HandleEvent(void);
+static Boolean HasColorQuickDraw(void);
 
 /* InitMacintosh()
    Initialize all the managers & memory */
@@ -30,6 +34,43 @@ void InitMacintosh(void) {
     InitDialogs(0L);
     InitCursor();
     
+    gHasColorQD = HasColorQuickDraw();
+}
+
+/* HasColorQuickDraw()
+   This gates not just RGBForeColor()/PaintRect()/NewCWindow() (which
+   only need basic Color QuickDraw, gestalt8BitQD) but also NewGWorld()
+   and friends, which are a distinct, later capability - "32-Bit
+   QuickDraw" - that a real machine can lack even with basic colour
+   present (an early colour Mac on a System without that extension,
+   for instance). Checking gestalt32BitQD covers both, since it
+   implies gestalt8BitQD. Calling a GWorld routine on a system that
+   only has basic Color QuickDraw is exactly the kind of thing that
+   can crash instead of failing gracefully, since the call may not
+   exist as a real trap at all rather than returning an error.
+   
+   The SysEnvirons() fallback is for systems old enough to predate the
+   Gestalt Manager - in practice that's early System 6 on 68000 Macs,
+   which never had colour hardware anyway, so this branch is mostly
+   defensive completeness. It can only report basic colour presence,
+   not 32-Bit QuickDraw specifically, so it's a narrower guarantee
+   than the Gestalt check above - accepted here since a real machine
+   old enough to lack Gestalt but with a GWorld-capable colour card is
+   vanishingly unlikely to exist. */
+static Boolean HasColorQuickDraw(void) {
+    long qdVersion;
+    
+    if (Gestalt(gestaltQuickdrawVersion, &qdVersion) == noErr)
+        return qdVersion >= gestalt32BitQD;
+    
+    {
+        SysEnvRec environment;
+        
+        if (SysEnvirons(1, &environment) == noErr)
+            return environment.hasColorQD;
+    }
+    
+    return false;
 }
 
 void HandleMouseDown (EventRecord *theEvent) {
