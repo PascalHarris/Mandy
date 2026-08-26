@@ -85,8 +85,14 @@ void HandleEvent(void) {
             case keyDown:
             case autoKey:
                 if ((theEvent.modifiers & cmdKey) != 0) {
-                    AdjustMenus();
-                    HandleMenu(MenuKey((char) (theEvent.message & charCodeMask)));
+                    char keyChar = (char) (theEvent.message & charCodeMask);
+                    
+                    if (keyChar == '.') {
+                        AbortFractalRender();
+                    } else {
+                        AdjustMenus();
+                        HandleMenu(MenuKey(keyChar));
+                    }
                 }
                 break;
                 

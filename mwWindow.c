@@ -48,6 +48,15 @@
 #define kJuliaConstantIm		0.27015
 #define kJuliaMaxIterations		300
 
+/* Window title shown while idle, versus while a progressive render is
+   under way. "\021" is the Command-key glyph (Mac OS Roman code 0x11,
+   the same character AppendMenu()'s "/" syntax draws automatically in
+   menus) - it displays correctly in the title bar's system font on
+   any real Mac. Swap in a plain "Cmd-." if that glyph ever turns out
+   not to render as expected. */
+#define kIdleWindowTitle		"\pFractal Window"
+#define kRenderingWindowTitle	"\pFractal Window (\021. to abort)"
+
 WindowPtr	mwWindow;
 Rect		dragRect;
 Rect		windowBounds = { windowY, windowX, windowY+windowHeight, windowX+windowWidth };
@@ -97,6 +106,8 @@ static void		ShadeBlock(const Rect *blockRect, short shadeLevel);
 static void		DrawFractalDirectly(void);
 static short	BlocksAcross(short span, short blockSize);
 static short	HighestPowerOfTwoAtMost(short n);
+static void		BeginRendering(void);
+static void		EndRendering(void);
 static void		StartProgressiveRender(FractalSampleProc sampleProc);
 static void		DrawNextBlockAndAdvance(void);
 static void		AdvanceToNextBlock(void);
@@ -108,7 +119,7 @@ static void		BlitOffscreenToWindow(void);
 void SetUpWindow(void) {
     dragRect = screenBits.bounds;
     
-    mwWindow = NewWindow(0L, &windowBounds, "\pFractal Window", true, noGrowDocProc, (WindowPtr) -1L, true, 0);
+    mwWindow = NewWindow(0L, &windowBounds, kIdleWindowTitle, true, noGrowDocProc, (WindowPtr) -1L, true, 0);
     SetPort(mwWindow);
     
     RenderFractalOffscreen();
@@ -293,6 +304,21 @@ static void DisposeOffscreenStore(void) {
     offscreenReady = false;
 }
 
+/* BeginRendering()/EndRendering()
+   The only two places fractalRenderJob.active changes, so the window
+   title - which should read one way while a render is in progress and
+   another once it's finished, been superseded, or never started - can
+   never drift out of sync with it. */
+static void BeginRendering(void) {
+	fractalRenderJob.active = true;
+	SetWTitle(mwWindow, kRenderingWindowTitle);
+}
+
+static void EndRendering(void) {
+	fractalRenderJob.active = false;
+	SetWTitle(mwWindow, kIdleWindowTitle);
+}
+
 /* StartProgressiveRender()
    Resets the render job to its coarsest pass. Nothing is drawn here -
    AdvanceFractalRender() draws the first block the next time it's
@@ -312,7 +338,7 @@ static void StartProgressiveRender(FractalSampleProc sampleProc) {
 	fractalRenderJob.rowCount    = BlocksAcross(imageHeight, fractalRenderJob.blockSize);
 	fractalRenderJob.nextColumn  = 0;
 	fractalRenderJob.nextRow     = 0;
-	fractalRenderJob.active      = true;
+	BeginRendering();
 }
 
 /* DrawNextBlockAndAdvance()
@@ -356,7 +382,7 @@ static void AdvanceToNextBlock(void) {
    kFinestBlockSize. */
 static void BeginNextPass(void) {
 	if (fractalRenderJob.blockSize <= kFinestBlockSize) {
-		fractalRenderJob.active = false;
+		EndRendering();
 		return;
 	}
 	
@@ -399,6 +425,7 @@ void RenderFractalOffscreen(void) {
     GetPort(&savedPort);
     
     if (!offscreenReady && !AllocateOffscreenStore()) {
+        EndRendering();
         SetPort(savedPort);
         return;
     }
@@ -408,13 +435,13 @@ void RenderFractalOffscreen(void) {
     
 	if (width == 1) {
 		DrawBranch(windowWidth/2, 0, 90, 9);
-		fractalRenderJob.active = false;
+		EndRendering();
 	} else if (width == 2) {
 		StartProgressiveRender(SampleMandelbrot);
 	} else if (width == 3) {
 		StartProgressiveRender(SampleJulia);
 	} else {
-		fractalRenderJob.active = false;
+		EndRendering();
 	}
     
     SetPort(savedPort);
@@ -443,6 +470,19 @@ void AdvanceFractalRender(void) {
     BlitOffscreenToWindow();
     
     SetPort(savedPort);
+}
+
+/* AbortFractalRender()
+   Stops whatever render job is in progress, leaving the image exactly
+   as refined as it currently is rather than reverting to blank -
+   there's nothing to "undo" back to. Safe to call whether or not a
+   render is actually running. Meant to be called when the user
+   presses Command-period (see MandyWindow.c's HandleEvent()). */
+void AbortFractalRender(void) {
+    if (!fractalRenderJob.active)
+        return;
+    
+    EndRendering();
 }
 
 /* HandleWindowResized()

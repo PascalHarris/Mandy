@@ -9,4 +9,5 @@ void DrawContent (short active);
 void SetUpWindow(void);
 void RenderFractalOffscreen(void);
 void AdvanceFractalRender(void);
+void AbortFractalRender(void);
 void HandleWindowResized(void);
