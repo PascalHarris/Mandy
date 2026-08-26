@@ -100,6 +100,8 @@ void HandleEvent(void) {
                 InvalRect(&mwWindow->portRect);
                 break;
         }
+    } else {
+        AdvanceFractalRender();
     }
 }
 
