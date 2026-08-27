@@ -276,7 +276,7 @@ void DrawInfoWindowContent(void) {
 	SetPort(gInfoWindow);
 	EraseRect(&gInfoWindow->portRect);
 	
-	TextFont(systemFont);
+	TextFont(applFont);
 	TextSize(kInfoFontSize);
 	GetFontInfo(&fontInfo);
 	lineHeight    = fontInfo.ascent + fontInfo.descent + fontInfo.leading;

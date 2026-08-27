@@ -33,25 +33,41 @@ extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
    before yielding back to the event loop. Smaller keeps the app
    checking for input more often (smoother, more responsive); larger
    finishes a render sooner but leaves longer gaps between input
-   checks. Worth retuning once this can be timed on real hardware. */
+   checks - though real timing (see below) suggests that trade-off
+   matters less than it looks: real render times before and after
+   region-limited blitting were statistically indistinguishable,
+   meaning per-tick blit cost was never the dominant factor, and each
+   tick still carries fixed overhead regardless of blit cost (the
+   GetPort()/SetPort() dance, EnterOffscreenPort()/EnterWindowPort(),
+   the changedRect bookkeeping) that a larger batch amortises across
+   more actual work. Raised from 4 to 16 on that basis. Even at 16, a
+   950+ second render still yields thousands of times over its
+   course, so Command-period responsiveness shouldn't be
+   noticeably affected - but this is a real trade-off, not a free
+   win, and worth watching if the render ever feels unresponsive. */
 #define kBlockGridTargetColumns	4
-#define kBlocksPerIdleSlice		4
+#define kBlocksPerIdleSlice		16
 
 /* Escape-time fractal parameters. kShadingScale is the common range
    both SampleMandelbrot() and SampleJulia() report on, so ShadeBlock()
    can use one fixed set of thresholds (monochrome) or one fixed colour
    ramp (colour) regardless of which fractal's own maxIterations
-   produced the value. */
+   produced the value.
+   
+   kMinimumIterationCeiling is the floor UpdateIterationCeilingForCurrentPass()
+   won't reduce a coarse pass's ceiling below - see that function for
+   why coarse passes get a reduced ceiling at all. */
 #define kShadingScale			64
+#define kMinimumIterationCeiling	8
 
-#define kMandelbrotZoom			150.0
+#define kMandelbrotZoom			150.0f
 #define kMandelbrotMaxIterations	64
 
-#define kJuliaZoom			1.0
-#define kJuliaOffsetX			0.0
-#define kJuliaOffsetY			0.0
-#define kJuliaConstantRe		-0.7
-#define kJuliaConstantIm		0.27015
+#define kJuliaZoom			1.0f
+#define kJuliaOffsetX			0.0f
+#define kJuliaOffsetY			0.0f
+#define kJuliaConstantRe		-0.7f
+#define kJuliaConstantIm		0.27015f
 #define kJuliaMaxIterations		300
 
 /* Window title shown while idle, versus while a progressive render is
@@ -100,6 +116,16 @@ static Boolean		offscreenReady = false;
    SampleJulia(). */
 typedef short (*FractalSampleProc)(short x, short y);
 
+/* The iteration ceiling SampleMandelbrot()/SampleJulia() actually use
+   for whatever pass is currently running - see
+   UpdateIterationCeilingForCurrentPass(). Explicitly set by every
+   caller of either sampler (the progressive job's pass-start/pass-
+   change points, and DrawFractalDirectly()'s fallback path) rather
+   than derived implicitly from fractalRenderJob state, since
+   DrawFractalDirectly() runs with no progressive job - and hence no
+   meaningful fractalRenderJob.blockSize - at all. */
+static short currentIterationCeiling;
+
 
 /* Progressive render job -------------------------------------------
    Tracks an in-progress coarse-to-fine render so AdvanceFractalRender()
@@ -120,7 +146,7 @@ static struct {
 
 static void			BeginRendering(void);
 static void			EndRendering(void);
-static short		IterateEscapeTime(double zRe, double zIm, double cRe, double cIm, short maxIterations);
+static short		IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short maxIterations);
 static short		SampleMandelbrot(short x, short y);
 static short		SampleJulia(short x, short y);
 static short		ShadeLevelForIterationCount(short iterationCount, short maxIterations);
@@ -139,12 +165,13 @@ static Boolean		AllocateOffscreenColorStore(void);
 static Boolean		AllocateOffscreenStore(void);
 static void			DisposeOffscreenStore(void);
 static void			StartProgressiveRender(FractalSampleProc sampleProc);
-static void			DrawNextBlockAndAdvance(void);
+static void			UpdateIterationCeilingForCurrentPass(void);
+static void			DrawNextBlockAndAdvance(Rect *drawnRect);
 static void			AdvanceToNextBlock(void);
 static void			BeginNextPass(void);
 static void			EnterOffscreenPort(void);
 static void			EnterWindowPort(void);
-static void			BlitOffscreenToWindow(void);
+static void			BlitOffscreenToWindow(const Rect *changedRect);
 
 /* SetUpWindow()
    Create the Minimum Window window, and open it - a colour window via
@@ -187,19 +214,62 @@ void DrawBranch(float x1, float y1, float angle, float depth) {
    they differ only in which of z's or c's starting value is the point
    being tested and which is fixed. Returns the number of iterations
    completed before |z| escaped past 2, or maxIterations if it never
-   did. */
-static short IterateEscapeTime(double zRe, double zIm, double cRe, double cIm, short maxIterations) {
-	short i;
+   did.
+   
+   Uses float rather than double: at this project's current fixed
+   zoom level, float's ~7 significant decimal digits are far more
+   precision than these constants need, and float arithmetic is
+   cheaper per operation on the target hardware's FPU than double.
+   This needs revisiting before any zoom/pan feature lands - deep
+   zooms are exactly where float's reduced precision starts producing
+   visibly incorrect (blocky) detail - not just made once and
+   forgotten.
+   
+   Includes periodicity checking: a saved (savedRe, savedIm) is
+   compared against the current z on every iteration, and updated at
+   doubling intervals (after 1, 2, 4, 8, ... iterations) - the
+   standard strategy for catching a cycle of any length within a
+   bounded number of comparisons. If z ever returns to exactly the
+   saved value, floating-point arithmetic being deterministic means
+   the sequence has entered a cycle and will iterate forever without
+   escaping, so maxIterations is returned immediately instead of
+   running out the remaining iterations for nothing.
+   
+   This is safe for any point on any escape-time fractal - it proves
+   something about this one point's own trajectory, not an inference
+   about neighbouring points, so unlike boundary-tracing-style
+   optimizations it doesn't depend on the fractal being simply
+   connected (our Julia set, for this project's constant, isn't).
+   Points that do escape are unaffected: they're moving outward and
+   will never return to an earlier value, so the check never fires
+   for them. The benefit is entirely for interior points, which
+   previously always ran the full maxIterations. */
+static short IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short maxIterations) {
+	short	i;
+	float	savedRe = zRe;
+	float	savedIm = zIm;
+	short	nextSaveAt = 1;
 	
 	for (i = 0; i < maxIterations; i++) {
-		double zReSquared = zRe * zRe;
-		double zImSquared = zIm * zIm;
+		float zReSquared = zRe * zRe;
+		float zImSquared = zIm * zIm;
 		
-		if (zReSquared + zImSquared > 4.0)
+		if (zReSquared + zImSquared > 4.0f)
 			break;
 		
-		zIm = 2.0 * zRe * zIm + cIm;
+		zIm = 2.0f * zRe * zIm + cIm;
 		zRe = zReSquared - zImSquared + cRe;
+		
+		if (zRe == savedRe && zIm == savedIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe    = zRe;
+			savedIm    = zIm;
+			nextSaveAt *= 2;
+		}
 	}
 	
 	return i;
@@ -209,32 +279,38 @@ static short IterateEscapeTime(double zRe, double zIm, double cRe, double cIm, s
    The point tested is c = (x,y); z starts at the origin. The image is
    symmetric about the vertical centre, so y is folded to a distance
    from the centre line rather than drawn twice as the original code
-   did. */
+   did. Uses currentIterationCeiling (see
+   UpdateIterationCeilingForCurrentPass()) rather than
+   kMandelbrotMaxIterations directly, so coarse preview passes can run
+   a cheaper, reduced ceiling while the finest pass - which determines
+   the final image - still gets the full one. */
 static short SampleMandelbrot(short x, short y) {
 	short verticalDistanceFromCentre = y - windowHeight/2;
-	double cRe, cIm;
-	short  iterationCount;
+	float cRe, cIm;
+	short iterationCount;
 	
 	if (verticalDistanceFromCentre < 0)
 		verticalDistanceFromCentre = -verticalDistanceFromCentre;
 	
-	cRe = (double) x / kMandelbrotZoom - 2.0;
-	cIm = (double) verticalDistanceFromCentre / kMandelbrotZoom;
+	cRe = (float) x / kMandelbrotZoom - 2.0f;
+	cIm = (float) verticalDistanceFromCentre / kMandelbrotZoom;
 	
-	iterationCount = IterateEscapeTime(0.0, 0.0, cRe, cIm, kMandelbrotMaxIterations);
+	iterationCount = IterateEscapeTime(0.0f, 0.0f, cRe, cIm, currentIterationCeiling);
 	
-	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
+	return ShadeLevelForIterationCount(iterationCount, currentIterationCeiling);
 }
 
 /* SampleJulia()
    The point tested is z's starting value; c is the fixed constant that
-   shapes the Julia set. */
+   shapes the Julia set. See SampleMandelbrot() above for why this
+   reads currentIterationCeiling rather than kJuliaMaxIterations
+   directly. */
 static short SampleJulia(short x, short y) {
-	double zRe = 1.5 * (x - windowWidth/2)  / (0.5 * kJuliaZoom * windowWidth)  + kJuliaOffsetX;
-	double zIm =       (y - windowHeight/2) / (0.5 * kJuliaZoom * windowHeight) + kJuliaOffsetY;
-	short  iterationCount = IterateEscapeTime(zRe, zIm, kJuliaConstantRe, kJuliaConstantIm, kJuliaMaxIterations);
+	float zRe = 1.5f * (x - windowWidth/2)  / (0.5f * kJuliaZoom * windowWidth)  + kJuliaOffsetX;
+	float zIm =        (y - windowHeight/2) / (0.5f * kJuliaZoom * windowHeight) + kJuliaOffsetY;
+	short iterationCount = IterateEscapeTime(zRe, zIm, kJuliaConstantRe, kJuliaConstantIm, currentIterationCeiling);
 	
-	return ShadeLevelForIterationCount(iterationCount, kJuliaMaxIterations);
+	return ShadeLevelForIterationCount(iterationCount, currentIterationCeiling);
 }
 
 /* ShadeLevelForIterationCount()
@@ -377,10 +453,24 @@ static short CurrentFinestBlockSize(void) {
 /* ShadeBlock()
    Colours a block according to how far up the shared kShadingScale its
    sample fell. In monochrome, that's one of QuickDraw's standard
-   dither patterns via FillRect(), unchanged from before this file
-   supported colour. In colour, it's a direct pixel-memory write via
-   FillIndexedRect() rather than any QuickDraw colour-setting call:
-   shadeLevel already *is* the correct index into our own colour table
+   dither patterns via FillRect() - the mechanism is unchanged from
+   before this file supported colour, but the threshold values are
+   evenly-spaced fifths of kShadingScale rather than the original
+   uneven split. That split was tuned for a linear iteration-to-shade
+   mapping; once that became the log-scale mapping in
+   ShadeLevelForIterationCount(), it left "black" firing for almost
+   any non-trivial iteration count (roughly shadeLevel > 32 turns out
+   to correspond to a raw Mandelbrot iteration count of only about 7
+   out of 64) - washing out the characteristic gray detail band into a
+   solid black interior, a real regression caught on real testing.
+   Evenly dividing the range instead spreads the five bands back
+   across where log-scaled values actually land. This affects only
+   the monochrome branch; the colour ramp below was already
+   recalibrated for the log scale when that mapping was introduced.
+   
+   In colour it's a direct pixel-memory write via FillIndexedRect()
+   rather than any QuickDraw colour-setting call: shadeLevel already
+   *is* the correct index into our own colour table
    (BuildFractalColorTable() constructs it that way on purpose), so
    there's nothing to search for or match - we already know the exact
    byte we want written. This is the second colour-setting approach
@@ -401,13 +491,13 @@ static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
 		return;
 	}
 	
-	if (shadeLevel > 32)
+	if (shadeLevel > (kShadingScale * 4) / 5)
 		FillRect(blockRect, black);
-	else if (shadeLevel > 24)
+	else if (shadeLevel > (kShadingScale * 3) / 5)
 		FillRect(blockRect, dkGray);
-	else if (shadeLevel > 12)
+	else if (shadeLevel > (kShadingScale * 2) / 5)
 		FillRect(blockRect, gray);
-	else if (shadeLevel > 6)
+	else if (shadeLevel > kShadingScale / 5)
 		FillRect(blockRect, ltGray);
 	else
 		FillRect(blockRect, white);
@@ -444,7 +534,10 @@ static void FillIndexedRect(const Rect *blockRect, short shadeLevel) {
    matters more than keeping it responsive. Works in colour or
    monochrome exactly like the progressive path, since it shares
    ShadeBlock() and just steps by CurrentFinestBlockSize() instead of
-   working through a job. */
+   working through a job. Sets currentIterationCeiling to each
+   fractal's real, full ceiling explicitly - there's no progressive
+   pass here to reduce it for, and this result has to be completely
+   correct in one shot since nothing will refine it further. */
 static void DrawFractalDirectly(void) {
 	EraseRect(&imageStart);
 	
@@ -454,6 +547,8 @@ static void DrawFractalDirectly(void) {
 		FractalSampleProc sampleProc = (width == 2) ? SampleMandelbrot : SampleJulia;
 		short step = CurrentFinestBlockSize();
 		short x, y;
+		
+		currentIterationCeiling = (width == 2) ? kMandelbrotMaxIterations : kJuliaMaxIterations;
 		
 		for (y = 0; y < windowHeight; y += step) {
 			for (x = 0; x < windowWidth; x += step) {
@@ -685,6 +780,34 @@ FractalParameters GetFractalParameters(void) {
 	return params;
 }
 
+/* UpdateIterationCeilingForCurrentPass()
+   Coarse passes get overdrawn by finer ones moments later, so they
+   don't need the full iteration ceiling to be useful as a preview - a
+   cheaper, reduced one that's still enough to show roughly the right
+   shade is plenty, right up until the finest pass, which determines
+   the final image and must use the real ceiling. The reduction scales
+   with how coarse the current block size is relative to the finest
+   one, floored at kMinimumIterationCeiling so even the coarsest pass
+   still shows some differentiation rather than none.
+   
+   This only reduces the *preview*, not the final result: by the time
+   the finest pass runs, blockSize == finestSize, the reduction factor
+   is 1, and currentIterationCeiling is exactly the fractal's real
+   ceiling - unchanged from before this existed. */
+static void UpdateIterationCeilingForCurrentPass(void) {
+	short fullCeiling = (width == 2) ? kMandelbrotMaxIterations : kJuliaMaxIterations;
+	short finestSize  = CurrentFinestBlockSize();
+	short reduction   = fractalRenderJob.blockSize / finestSize;
+	short reduced     = fullCeiling / reduction;
+	
+	if (reduced < kMinimumIterationCeiling)
+		reduced = kMinimumIterationCeiling;
+	if (reduced > fullCeiling)
+		reduced = fullCeiling;
+	
+	currentIterationCeiling = reduced;
+}
+
 /* StartProgressiveRender()
    Resets the render job to its coarsest pass. Nothing is drawn here -
    AdvanceFractalRender() draws the first block the next time it's
@@ -705,14 +828,18 @@ static void StartProgressiveRender(FractalSampleProc sampleProc) {
 	fractalRenderJob.rowCount    = BlocksAcross(imageHeight, fractalRenderJob.blockSize);
 	fractalRenderJob.nextColumn  = 0;
 	fractalRenderJob.nextRow     = 0;
+	UpdateIterationCeilingForCurrentPass();
 	BeginRendering();
 }
 
 /* DrawNextBlockAndAdvance()
    Samples and shades the single next block in the job, then moves the
    job on to the following block (or the next pass, or completion).
-   Assumes the offscreen port is already current. */
-static void DrawNextBlockAndAdvance(void) {
+   Assumes the offscreen port is already current. Reports the block's
+   (clipped) rect via drawnRect, so AdvanceFractalRender() can union
+   it with whatever else it draws in the same call and blit only that
+   combined region afterward, rather than the whole image. */
+static void DrawNextBlockAndAdvance(Rect *drawnRect) {
 	Rect	blockRect, clippedRect;
 	short	sampleX, sampleY;
 	short	left = fractalRenderJob.nextColumn * fractalRenderJob.blockSize;
@@ -725,6 +852,8 @@ static void DrawNextBlockAndAdvance(void) {
 	sampleY = clippedRect.top  + (clippedRect.bottom - clippedRect.top)  / 2;
 	
 	ShadeBlock(&clippedRect, fractalRenderJob.sampleProc(sampleX, sampleY));
+	
+	*drawnRect = clippedRect;
 	
 	AdvanceToNextBlock();
 }
@@ -758,6 +887,7 @@ static void BeginNextPass(void) {
 	fractalRenderJob.rowCount    = BlocksAcross(offscreenBounds.bottom - offscreenBounds.top,  fractalRenderJob.blockSize);
 	fractalRenderJob.nextColumn  = 0;
 	fractalRenderJob.nextRow     = 0;
+	UpdateIterationCeilingForCurrentPass();
 }
 
 /* EnterOffscreenPort()/EnterWindowPort()
@@ -807,13 +937,24 @@ Boolean GetOffscreenImage(BitMap **bits, Rect *bounds) {
 }
 
 /* BlitOffscreenToWindow()
-   Copies the offscreen store onto the window. Assumes the caller has
-   already called EnterWindowPort() (both DrawContent() and
-   AdvanceFractalRender() do this themselves, since each needs the
-   port/device set for its own reasons too). */
-static void BlitOffscreenToWindow(void) {
+   Copies the offscreen store onto the window - either the whole
+   thing (changedRect NULL, for DrawContent(), which doesn't know what
+   specifically needs repainting) or just changedRect (for
+   AdvanceFractalRender(), which does: the region its last handful of
+   blocks actually touched). Copying only what changed avoids
+   re-copying the entire image on every idle tick regardless of how
+   little of it is new - by rough count, on the order of 7-8 GB of
+   redundant copying over one full render at the image's full size,
+   almost all of it pixels that hadn't changed since the previous
+   tick.
+   
+   Assumes the caller has already called EnterWindowPort() (both
+   DrawContent() and AdvanceFractalRender() do this themselves, since
+   each needs the port/device set for its own reasons too). */
+static void BlitOffscreenToWindow(const Rect *changedRect) {
     BitMap	*sourceBits;
     Rect	sourceBounds;
+    Rect	blitRect;
     
     if (!GetOffscreenImage(&sourceBits, &sourceBounds))
         return;
@@ -821,7 +962,15 @@ static void BlitOffscreenToWindow(void) {
     if (!((WindowPeek) mwWindow)->visible)
         return;
     
-    CopyBits(sourceBits, &mwWindow->portBits, &sourceBounds, &imageStart, srcCopy, NULL);
+    if (changedRect != NULL)
+        SectRect(changedRect, &sourceBounds, &blitRect);
+    else
+        blitRect = sourceBounds;
+    
+    /* The offscreen store and the window's content area share the same
+       coordinate space - both originate at (0,0) at the same size - so
+       blitRect serves as both the source and destination rect here. */
+    CopyBits(sourceBits, &mwWindow->portBits, &blitRect, &blitRect, srcCopy, NULL);
 }
 
 /* RenderFractalOffscreen()
@@ -876,6 +1025,7 @@ void RenderFractalOffscreen(void) {
 void AdvanceFractalRender(void) {
     GrafPtr	savedPort;
     short	blocksRemaining = kBlocksPerIdleSlice;
+    Rect	changedRect, blockRect;
     
     if (!fractalRenderJob.active || !offscreenReady)
         return;
@@ -883,11 +1033,20 @@ void AdvanceFractalRender(void) {
     GetPort(&savedPort);
     
     EnterOffscreenPort();
-    while (fractalRenderJob.active && blocksRemaining-- > 0)
-        DrawNextBlockAndAdvance();
+    
+    /* fractalRenderJob.active is already known true (checked above), so
+       this first block always runs, seeding changedRect; the loop below
+       covers whatever's left of this tick's kBlocksPerIdleSlice budget. */
+    DrawNextBlockAndAdvance(&changedRect);
+    blocksRemaining--;
+    
+    while (fractalRenderJob.active && blocksRemaining-- > 0) {
+        DrawNextBlockAndAdvance(&blockRect);
+        UnionRect(&changedRect, &blockRect, &changedRect);
+    }
     
     EnterWindowPort();
-    BlitOffscreenToWindow();
+    BlitOffscreenToWindow(&changedRect);
     
     SetPort(savedPort);
 }
@@ -937,7 +1096,7 @@ void DrawContent(short active) {
     EnterWindowPort();
     
     if (offscreenReady)
-        BlitOffscreenToWindow();
+        BlitOffscreenToWindow(NULL);
     else
         DrawFractalDirectly();
 }
