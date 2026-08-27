@@ -140,23 +140,6 @@ static void			BeginNextPass(void);
 static void			EnterOffscreenPort(void);
 static void			EnterWindowPort(void);
 static void			BlitOffscreenToWindow(void);
-static void			Checkpoint(short n);	/* TEMPORARY DIAGNOSTIC - see SetUpWindow()/RenderFractalOffscreen() */
-
-/* Checkpoint()
-   TEMPORARY DIAGNOSTIC. Draws a small black square at a position that
-   depends only on n, using nothing but SetPort()/FillRect()/black -
-   the same primitives already proven safe elsewhere - so this can't
-   plausibly be the thing that crashes. Call it at a numbered sequence
-   of points; whichever square is the last one drawn tells us exactly
-   how far execution got. Remove every call to this, and this function
-   itself, once that's answered. */
-static void Checkpoint(short n) {
-	Rect r;
-	
-	SetPort(mwWindow);
-	SetRect(&r, 10 + n * 20, 10, 10 + n * 20 + 15, 25);
-	FillRect(&r, black);
-}
 
 /* SetUpWindow()
    Create the Minimum Window window, and open it - a colour window via
@@ -174,15 +157,9 @@ void SetUpWindow(void) {
     else
         mwWindow = NewWindow(0L, &windowBounds, kIdleWindowTitle, true, noGrowDocProc, (WindowPtr) -1L, true, 0);
     
-    Checkpoint(0);	/* TEMPORARY DIAGNOSTIC: window created */
-    
     SetPort(mwWindow);
     
-    Checkpoint(1);	/* TEMPORARY DIAGNOSTIC: about to call RenderFractalOffscreen() */
-    
     RenderFractalOffscreen();
-    
-    Checkpoint(9);	/* TEMPORARY DIAGNOSTIC: RenderFractalOffscreen() returned */
 }
 
 void DrawBranch(float x1, float y1, float angle, float depth) {
@@ -461,12 +438,8 @@ static Boolean AllocateOffscreenColorStore(void) {
 	if (fractalColors == NULL)
 		return false;
 	
-	Checkpoint(5);	/* TEMPORARY DIAGNOSTIC: colour table built */
-	
 	error = NewGWorld(&offscreenGWorld, 8, &imageStart, fractalColors, NULL, 0);
 	DisposeCTable(fractalColors);	/* NewGWorld() copies what it needs, per Inside Mac - see chat */
-	
-	Checkpoint(6);	/* TEMPORARY DIAGNOSTIC: NewGWorld() + DisposeCTable() returned */
 	
 	if (error != noErr)
 		return false;
@@ -475,8 +448,6 @@ static Boolean AllocateOffscreenColorStore(void) {
 		DisposeGWorld(offscreenGWorld);
 		return false;
 	}
-	
-	Checkpoint(7);	/* TEMPORARY DIAGNOSTIC: pixels locked */
 	
 	return true;
 }
@@ -518,15 +489,37 @@ static void DisposeOffscreenStore(void) {
    The only two places fractalRenderJob.active changes, so the window
    title - which should read one way while a render is in progress and
    another once it's finished, been superseded, or never started - can
-   never drift out of sync with it. */
+   never drift out of sync with it.
+   
+   Both of these can be called while the offscreen GWorld, not the
+   window, is the current port (EndRendering() in particular fires
+   from deep inside the block-drawing loop the instant the finest pass
+   completes, and on every very first render regardless of what's
+   selected, since the default width matches no fractal). SetWTitle()
+   is explicitly given the window as a parameter, but its title-bar
+   redraw appears not to be as indifferent to the current port as
+   that suggests - so the port is saved, forced to the window, and
+   restored around it, rather than trusting whatever was current. */
 static void BeginRendering(void) {
+	GrafPtr savedPort;
+	
 	fractalRenderJob.active = true;
+	
+	GetPort(&savedPort);
+	SetPort(mwWindow);
 	SetWTitle(mwWindow, kRenderingWindowTitle);
+	SetPort(savedPort);
 }
 
 static void EndRendering(void) {
+	GrafPtr savedPort;
+	
 	fractalRenderJob.active = false;
+	
+	GetPort(&savedPort);
+	SetPort(mwWindow);
 	SetWTitle(mwWindow, kIdleWindowTitle);
+	SetPort(savedPort);
 }
 
 /* StartProgressiveRender()
@@ -668,23 +661,14 @@ void RenderFractalOffscreen(void) {
     
     GetPort(&savedPort);
     
-    Checkpoint(2);	/* TEMPORARY DIAGNOSTIC: entered RenderFractalOffscreen, port saved */
-    
     if (!offscreenReady && !AllocateOffscreenStore()) {
         EndRendering();
         SetPort(savedPort);
         return;
     }
     
-    Checkpoint(3);	/* TEMPORARY DIAGNOSTIC: offscreen store ready */
-    
     EnterOffscreenPort();
-    
-    Checkpoint(8);	/* TEMPORARY DIAGNOSTIC: offscreen port entered */
-    
     EraseRect(&offscreenBounds);
-    
-    Checkpoint(4);	/* TEMPORARY DIAGNOSTIC: offscreen port erased */
     
 	if (width == 1) {
 		DrawBranch(windowWidth/2, 0, 90, 9);
