@@ -9,6 +9,7 @@
 #include "mwWindow.h"
 #include "mwInfo.h"
 #include "mwSaveAs.h"
+#include "mwColorCycle.h"
 
 extern	WindowPtr mwWindow;
 extern	int	width;
@@ -31,6 +32,12 @@ enum {
     quitItem = 7
 };
 
+/* Fractal menu: Tree/Mandelbrot/Julia occupy items 1-3 (their item
+   number is width - see HandleMenu()'s fractalID case); item 4 is a
+   divider; animateItem is the "Animate"/"Stop Animation" toggle below
+   it - see mwColorCycle.h. */
+#define animateItem	5
+
 
 /* SetUpMenus()
    Set up the menus. Normally, we’d use a resource file, but
@@ -44,7 +51,7 @@ void SetUpMenus(void) {
     AddResMenu(appleMenu, 'DRVR');
     AppendMenu(fileMenu, "\pOpen/O;Close/W;(-;Get Info/I;Save As...;(-;Quit/Q");
     AppendMenu(editMenu, "\pUndo/Z;(-;Cut/X;Copy/C;Paste/V;Clear");
-    AppendMenu(fractalMenu, "\pTree/T;Mandelbrot/M;Julia/J");
+    AppendMenu(fractalMenu, "\pTree/T;Mandelbrot/M;Julia/J;(-;Animate");
 }
 
 /* AdjustMenus()
@@ -143,10 +150,16 @@ void HandleMenu (long mSelect) {
             break;
             
      	case fractalID:
-             CheckItem(fractalMenu, width, false);
-             width = menuItem;
-             RenderFractalOffscreen();
-             InvalRect(&mwWindow->portRect);
+             if (menuItem == animateItem) {
+                 ToggleAnimation();
+                 SetItem(fractalMenu, animateItem, IsAnimationActive() ? "\pStop Animation" : "\pAnimate");
+             } else {
+                 EnsureWindowVisible();
+                 CheckItem(fractalMenu, width, false);
+                 width = menuItem;
+                 RenderFractalOffscreen();
+                 InvalRect(&mwWindow->portRect);
+             }
              break;
     }
 }

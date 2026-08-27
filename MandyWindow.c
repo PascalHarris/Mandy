@@ -9,6 +9,7 @@
 #include "mwMenus.h"
 #include "mwWindow.h"
 #include "mwInfo.h"
+#include "mwColorCycle.h"
 #include <GestaltEqu.h>
 
 extern	WindowPtr	mwWindow;
@@ -170,6 +171,7 @@ void HandleEvent(void) {
     } else {
         AdvanceFractalRender();
         RefreshInfoWindowIfNeeded();
+        AnimationTask();
     }
 }
 

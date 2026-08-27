@@ -111,6 +111,19 @@ static GWorldPtr	offscreenGWorld;
 static Rect			offscreenBounds;
 static Boolean		offscreenReady = false;
 
+/* Mono pattern-cycling support (see ApplyMonoPatternPhase()) --------
+   One byte per finest-size cell (CurrentFinestBlockSize() when not
+   rendering in colour), recording the shade level ShadeBlock() last
+   drew there - a coarse pass records the same level into every finest
+   cell under it, which a later, finer pass then overwrites with more
+   accurate values, so by the time a render completes every entry
+   reflects the actual final image, exactly like the pixels themselves.
+   NULL until animation has been turned on at least once (see
+   EnableMonoShadeLevelTracking()) - most runs never touch this. */
+static unsigned char	*gMonoShadeLevels = NULL;
+static short			gMonoShadeLevelColumns;
+static short			gMonoShadeLevelRows;
+
 /* A fractal sample function reports how "escaped" the point at (x,y)
    is, on the shared kShadingScale range - see SampleMandelbrot() and
    SampleJulia(). */
@@ -174,6 +187,9 @@ static short		CurrentFinestBlockSize(void);
 static Boolean		ShouldRenderInColor(void);
 static void			ShadeBlock(const Rect *blockRect, short shadeLevel);
 static void			FillIndexedRect(const Rect *blockRect, short shadeLevel);
+static short		MonoBandIndexForShadeLevel(short shadeLevel, short phase);
+static void			FillMonoBand(const Rect *blockRect, short bandIndex);
+static void			RecordMonoShadeLevels(const Rect *blockRect, short shadeLevel);
 static void			DrawFractalDirectly(void);
 static short		BlocksAcross(short span, short blockSize);
 static short		HighestPowerOfTwoAtMost(short n);
@@ -514,23 +530,102 @@ static short CurrentFinestBlockSize(void) {
    PmForeColor() would have sidestepped that same search, but its
    Palette Manager glue isn't linked into this project and pulling it
    in wasn't chased down. Writing the byte directly avoids both: no
-   device dependency, no Palette Manager dependency, nothing to link. */
+   device dependency, no Palette Manager dependency, nothing to link.
+   
+   The mono threshold ladder itself lives in MonoBandIndexForShadeLevel()
+   /FillMonoBand() now, not inline here, so ApplyMonoPatternPhase() (see
+   mwColorCycle.c's Animate feature) can redraw a cell from a
+   previously-recorded shade level using the same ladder, just with a
+   phase added in. Recording that shade level, via
+   RecordMonoShadeLevels(), only happens once animation has actually
+   been turned on at least once (see EnableMonoShadeLevelTracking()) -
+   an unconditional NULL check, essentially free, for everyone else. */
 static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
 	if (ShouldRenderInColor()) {
 		FillIndexedRect(blockRect, shadeLevel);
 		return;
 	}
 	
+	FillMonoBand(blockRect, MonoBandIndexForShadeLevel(shadeLevel, 0));
+	
+	if (gMonoShadeLevels != NULL)
+		RecordMonoShadeLevels(blockRect, shadeLevel);
+}
+
+/* MonoBandIndexForShadeLevel()
+   Maps a shadeLevel (0..kShadingScale) to one of five band indices -
+   0 (lightest) through 4 (darkest) - via the same evenly-spaced-fifths
+   ladder ShadeBlock() always used, then adds phase and wraps, so
+   ApplyMonoPatternPhase()'s animated redraw and this file's normal
+   rendering share one definition of where the bands fall. phase is 0
+   for normal rendering (see ShadeBlock()), and mwColorCycle.c's
+   current animation phase otherwise. */
+static short MonoBandIndexForShadeLevel(short shadeLevel, short phase) {
+	short bandIndex;
+	
 	if (shadeLevel > (kShadingScale * 4) / 5)
-		FillRect(blockRect, black);
+		bandIndex = 4;
 	else if (shadeLevel > (kShadingScale * 3) / 5)
-		FillRect(blockRect, dkGray);
+		bandIndex = 3;
 	else if (shadeLevel > (kShadingScale * 2) / 5)
-		FillRect(blockRect, gray);
+		bandIndex = 2;
 	else if (shadeLevel > kShadingScale / 5)
-		FillRect(blockRect, ltGray);
+		bandIndex = 1;
 	else
-		FillRect(blockRect, white);
+		bandIndex = 0;
+	
+	bandIndex = (bandIndex + phase) % 5;
+	if (bandIndex < 0)
+		bandIndex += 5;
+	
+	return bandIndex;
+}
+
+/* FillMonoBand()
+   Fills blockRect with the one standard QuickDraw dither pattern
+   corresponding to bandIndex (0 lightest/white through 4
+   darkest/black) - a plain switch rather than an array of Pattern
+   pointers, since Think C's handling of QuickDraw's Pattern globals in
+   a static initializer isn't something worth risking untested. */
+static void FillMonoBand(const Rect *blockRect, short bandIndex) {
+	switch (bandIndex) {
+		case 4:  FillRect(blockRect, black);  break;
+		case 3:  FillRect(blockRect, dkGray); break;
+		case 2:  FillRect(blockRect, gray);   break;
+		case 1:  FillRect(blockRect, ltGray); break;
+		default: FillRect(blockRect, white);  break;
+	}
+}
+
+/* RecordMonoShadeLevels()
+   Writes shadeLevel into every finest-grid cell gMonoShadeLevels has
+   for the area blockRect covers - a single cell when blockRect is
+   already finest-sized, or several when it's a coarser pass's block,
+   in which case a later, finer pass's own call here will overwrite
+   the same cells with more accurate values before a render completes.
+   Clips against gMonoShadeLevelColumns/Rows defensively, in case
+   blockRect's ceiling-divided grid extends slightly past the buffer's
+   own bounds at the image's true edge - mirroring the same edge
+   handling BlocksAcross() already requires elsewhere in this file. */
+static void RecordMonoShadeLevels(const Rect *blockRect, short shadeLevel) {
+	short finestSize   = CurrentFinestBlockSize();
+	short startColumn  = blockRect->left / finestSize;
+	short startRow     = blockRect->top  / finestSize;
+	short endColumn    = (blockRect->right  + finestSize - 1) / finestSize;
+	short endRow       = (blockRect->bottom + finestSize - 1) / finestSize;
+	short column, row;
+	
+	if (endColumn > gMonoShadeLevelColumns)
+		endColumn = gMonoShadeLevelColumns;
+	if (endRow > gMonoShadeLevelRows)
+		endRow = gMonoShadeLevelRows;
+	
+	for (row = startRow; row < endRow; row++) {
+		unsigned char *rowStart = gMonoShadeLevels + (long) row * gMonoShadeLevelColumns + startColumn;
+		
+		for (column = startColumn; column < endColumn; column++)
+			*rowStart++ = (unsigned char) shadeLevel;
+	}
 }
 
 /* FillIndexedRect()
@@ -744,21 +839,35 @@ static Boolean AllocateOffscreenStore(void) {
    Frees whichever offscreen store is currently allocated so it can be
    reallocated at a new size (see HandleWindowResized()). Safe to call
    when nothing is currently allocated. */
+/* DisposeOffscreenStore()
+   Frees whichever offscreen store is currently allocated so it can be
+   reallocated at a new size (see HandleWindowResized()). Safe to call
+   when nothing is currently allocated.
+   
+   Also frees gMonoShadeLevels, if allocated: it's sized for the
+   current image, so it would be the wrong size for whatever gets
+   allocated next. EnableMonoShadeLevelTracking() reallocates it
+   lazily the next time it's needed, so nothing needs to eagerly
+   reallocate it here. */
 static void DisposeOffscreenStore(void) {
-    if (!offscreenReady)
-        return;
-    
-    if (gHasColorQD) {
-        UnlockPixels(((CGrafPtr) offscreenGWorld)->portPixMap);
-        DisposeGWorld(offscreenGWorld);
-        offscreenGWorld = NULL;
-    } else {
-        ClosePort(&offscreenPort);
-        DisposePtr(offscreenBits.baseAddr);
-        offscreenBits.baseAddr = NULL;
+    if (offscreenReady) {
+        if (gHasColorQD) {
+            UnlockPixels(((CGrafPtr) offscreenGWorld)->portPixMap);
+            DisposeGWorld(offscreenGWorld);
+            offscreenGWorld = NULL;
+        } else {
+            ClosePort(&offscreenPort);
+            DisposePtr(offscreenBits.baseAddr);
+            offscreenBits.baseAddr = NULL;
+        }
+        
+        offscreenReady = false;
     }
     
-    offscreenReady = false;
+    if (gMonoShadeLevels != NULL) {
+        DisposePtr((Ptr) gMonoShadeLevels);
+        gMonoShadeLevels = NULL;
+    }
 }
 
 /* BeginRendering()/EndRendering()
@@ -1040,6 +1149,124 @@ Boolean GetOffscreenImage(BitMap **bits, Rect *bounds) {
 	*bits   = gHasColorQD ? &((GrafPtr) offscreenGWorld)->portBits : &offscreenBits;
 	*bounds = offscreenBounds;
 	return true;
+}
+
+/* GetOffscreenColorTable()
+   Returns the offscreen colour GWorld's own CTabHandle - the actual
+   one it owns internally, not the temporary one BuildFractalColorTable()
+   built and NewGWorld() copied from at allocation time (that copy is
+   disposed immediately after, in AllocateOffscreenColorStore()). A
+   PixMap's pmTable field is exactly this: the colour table QuickDraw
+   itself consults whenever it needs to interpret that PixMap's index
+   bytes as colours - which CopyBits() does on every blit. Rotating
+   this table's own RGB entries in place, then blitting the (entirely
+   unchanged) pixel data again via RefreshWholeDisplay(), is how
+   mwColorCycle.c's Animate feature shows different colours without
+   redrawing a single pixel - real Mac colour-cycling, not a
+   recompute-and-redraw pretending to be one. */
+CTabHandle GetOffscreenColorTable(void) {
+	if (!gHasColorQD || !offscreenReady)
+		return NULL;
+	
+	return (**((CGrafPtr) offscreenGWorld)->portPixMap).pmTable;
+}
+
+Boolean IsRenderingInColor(void) {
+	return ShouldRenderInColor();
+}
+
+/* RefreshWholeDisplay()
+   Blits the whole current offscreen image to the window, exactly like
+   an update event's DrawContent() call would, but callable any time -
+   for mwColorCycle.c to show a rotated colour table or a phase-shifted
+   pattern redraw without waiting for or forcing an actual update
+   event. */
+void RefreshWholeDisplay(void) {
+	EnterWindowPort();
+	BlitOffscreenToWindow(NULL);
+}
+
+/* EnableMonoShadeLevelTracking()
+   Allocates gMonoShadeLevels at one byte per finest-grid cell of the
+   current image, if it isn't already allocated. Sized from imageStart
+   and CurrentFinestBlockSize() exactly the way the mono offscreen
+   store itself is sized in AllocateOffscreenMonoStore() - this buffer
+   just isn't part of that allocation, since most runs never turn
+   animation on and never need it. Safe to call when rendering in
+   colour (returns true having allocated nothing useful) - callers
+   still shouldn't bother, but nothing breaks if they do. */
+Boolean EnableMonoShadeLevelTracking(void) {
+	short storeWidth, storeHeight, finestSize;
+	
+	if (gMonoShadeLevels != NULL)
+		return true;
+	
+	finestSize  = CurrentFinestBlockSize();
+	storeWidth  = imageStart.right  - imageStart.left;
+	storeHeight = imageStart.bottom - imageStart.top;
+	
+	gMonoShadeLevelColumns = BlocksAcross(storeWidth,  finestSize);
+	gMonoShadeLevelRows    = BlocksAcross(storeHeight, finestSize);
+	
+	gMonoShadeLevels = (unsigned char *) NewPtr((long) gMonoShadeLevelColumns * gMonoShadeLevelRows);
+	
+	return (gMonoShadeLevels != NULL);
+}
+
+/* ApplyMonoPatternPhase()
+   Redraws every finest-grid cell of the mono offscreen image from its
+   already-recorded shade level (see RecordMonoShadeLevels()) and the
+   given phase, via the same MonoBandIndexForShadeLevel()/FillMonoBand()
+   ladder normal rendering uses - only pattern lookups and FillRect
+   calls, no fractal math, which is what keeps this cheap enough to
+   repeat every couple of ticks. Leaves the result in the offscreen
+   store; the caller still needs RefreshWholeDisplay() to show it.
+   
+   Declines to do anything - rather than draw from stale or half-
+   updated data - if tracking was never enabled, or if a render is
+   currently in progress: mid-render, gMonoShadeLevels is a mix of
+   accurate finished-pass values and coarser not-yet-refined ones (see
+   RecordMonoShadeLevels()), which would show as visible blockiness
+   rather than the actual image. */
+void ApplyMonoPatternPhase(short phase) {
+	short	finestSize = CurrentFinestBlockSize();
+	short	column, row;
+	GrafPtr	savedPort;
+	
+	if (gMonoShadeLevels == NULL || IsRenderActive())
+		return;
+	
+	GetPort(&savedPort);
+	EnterOffscreenPort();
+	
+	for (row = 0; row < gMonoShadeLevelRows; row++) {
+		for (column = 0; column < gMonoShadeLevelColumns; column++) {
+			short shadeLevel = gMonoShadeLevels[(long) row * gMonoShadeLevelColumns + column];
+			short left       = column * finestSize;
+			short top        = row    * finestSize;
+			Rect  cellRect;
+			
+			SetRect(&cellRect, left, top, left + finestSize, top + finestSize);
+			FillMonoBand(&cellRect, MonoBandIndexForShadeLevel(shadeLevel, phase));
+		}
+	}
+	
+	SetPort(savedPort);
+}
+
+/* EnsureWindowVisible()
+   mwWindow is created once at launch (see SetUpWindow(), called from
+   main()) and never disposed - its close box only hides it (see
+   HandleEvent()'s inGoAway case) - so "no window is open" always means
+   "mwWindow exists but isn't visible", never a NULL window to create.
+   Calling SetUpWindow() again here would create a second, duplicate
+   window rather than reopening this one. */
+void EnsureWindowVisible(void) {
+	if (((WindowPeek) mwWindow)->visible)
+		return;
+	
+	ShowWindow(mwWindow);
+	SelectWindow(mwWindow);
 }
 
 /* BlitOffscreenToWindow()

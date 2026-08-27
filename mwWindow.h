@@ -41,3 +41,56 @@ FractalParameters GetFractalParameters(void);
    false (leaving *bits/*bounds untouched) if there's nothing to read -
    the offscreen store failed to allocate under low memory. */
 Boolean GetOffscreenImage(BitMap **bits, Rect *bounds);
+
+/* Support for the Animate feature (mwColorCycle.c) -------------------
+   Animation rotates the already-rendered image's colours/patterns in
+   place rather than recomputing the fractal, so it stays cheap enough
+   to run every couple of ticks. These expose just enough of this
+   file's internals for mwColorCycle.c to do that: */
+
+/* The offscreen colour GWorld's own colour table, for rotating its RGB
+   entries directly (bypassing SetGWorld/the Palette Manager - see
+   mwColorCycle.c for why). NULL if there's no colour offscreen store
+   (no colour QuickDraw, or allocation failed under low memory). */
+CTabHandle GetOffscreenColorTable(void);
+
+/* True if the current screen depth and gHasColorQD together mean
+   fractals are actually being rendered in colour right now - i.e.
+   ShouldRenderInColor(), exposed for mwColorCycle.c to decide which
+   of colour-cycling or pattern-cycling applies. */
+Boolean IsRenderingInColor(void);
+
+/* Blits the whole current offscreen image to the window, exactly as
+   an update event would - for mwColorCycle.c to call after rotating
+   colours or patterns, without going through an actual update event. */
+void RefreshWholeDisplay(void);
+
+/* Allocates the byte-per-finest-cell shade-level buffer the mono
+   pattern-cycling path needs (see ApplyMonoPatternPhase()) if it
+   hasn't been already. Only meaningful when not rendering in colour;
+   harmless but wasteful to call otherwise. Returns false if the
+   allocation failed - mwColorCycle.c should decline to start
+   animating in that case rather than call ApplyMonoPatternPhase()
+   with nothing behind it. Idempotent: once allocated, later calls
+   just return true immediately. */
+Boolean EnableMonoShadeLevelTracking(void);
+
+/* Redraws every finest-size cell of the mono offscreen image using
+   its already-known shade level (recorded by ShadeBlock() during
+   normal rendering - see RecordMonoShadeLevels() in mwWindow.c) and
+   the given phase, then leaves the result in the offscreen store for
+   the caller to blit via RefreshWholeDisplay(). No fractal math runs
+   here - only pattern lookups and FillRect calls - which is what
+   keeps this cheap enough to repeat every couple of ticks. Does
+   nothing if EnableMonoShadeLevelTracking() hasn't succeeded, or if a
+   render is currently in progress (the recorded shade levels would be
+   a mix of old and not-yet-updated values mid-render). */
+void ApplyMonoPatternPhase(short phase);
+
+/* Shows and selects mwWindow if it's currently hidden (the person
+   closed it via its close box, which only hides it - see
+   HandleEvent()'s inGoAway case - it's created once at launch and
+   never disposed). Called before rendering a newly-selected fractal,
+   so picking a fractal from the menu always has somewhere to show it.
+   Does nothing if the window is already visible. */
+void EnsureWindowVisible(void);
