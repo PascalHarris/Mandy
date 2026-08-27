@@ -126,7 +126,10 @@ static RGBColor		ColorForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
 static CTabHandle	BuildFractalColorTable(short entryCount);
 static short		CurrentFinestBlockSize(void);
+static short		CurrentScreenDepth(void);
+static Boolean		ShouldRenderInColor(void);
 static void			ShadeBlock(const Rect *blockRect, short shadeLevel);
+static void			FillIndexedRect(const Rect *blockRect, short shadeLevel);
 static void			DrawFractalDirectly(void);
 static short		BlocksAcross(short span, short blockSize);
 static short		HighestPowerOfTwoAtMost(short n);
@@ -331,28 +334,69 @@ static CTabHandle BuildFractalColorTable(short entryCount) {
 	return colorTable;
 }
 
+/* CurrentScreenDepth()
+   The main screen's current pixel depth in bits (1, 2, 4, 8, 16, or
+   32). Checked fresh each time rather than cached, since it's cheap
+   (a couple of field reads, no searching) and it means a depth change
+   made mid-session via the Monitors control panel is picked up on the
+   next render rather than needing a relaunch. Assumes a single
+   display, matching the simplification already made elsewhere for
+   this app's fixed small window. */
+static short CurrentScreenDepth(void) {
+	GDHandle		mainDevice       = GetMainDevice();
+	PixMapHandle	mainDevicePixMap = (**mainDevice).gdPMap;
+	
+	return (**mainDevicePixMap).pixelSize;
+}
+
+/* ShouldRenderInColor()
+   Colour QuickDraw being present isn't by itself a reason to draw in
+   colour: at 1-bit and 2-bit depths the render should look exactly
+   like a genuine black-and-white Mac, with no attempt at colour at
+   all, rather than colour that then gets dithered down to almost
+   nothing meaningful. This is the single place that decision is made;
+   ShadeBlock() and CurrentFinestBlockSize() both defer to it instead
+   of checking gHasColorQD directly. */
+static Boolean ShouldRenderInColor(void) {
+	return gHasColorQD && (CurrentScreenDepth() >= 4);
+}
+
 /* CurrentFinestBlockSize()
-   Colour refines all the way to real 1x1 pixels. Monochrome stops one
-   level short, at 2x2, leaving room for a dither pattern to simulate
-   colour on a 1-bit screen at the finest visible unit - the same 2x2
-   granularity the original hand-written Mandelbrot()/Julia() sampled
-   at, now generalised to every block size via ShadeBlock(). */
+   Colour refines all the way to real 1x1 pixels. Monochrome - which
+   now includes 1-bit and 2-bit colour screens, not just genuinely
+   monochrome ones, see ShouldRenderInColor() - stops one level short,
+   at 2x2, leaving room for a dither pattern to simulate colour at the
+   finest visible unit - the same 2x2 granularity the original
+   hand-written Mandelbrot()/Julia() sampled at, now generalised to
+   every block size via ShadeBlock(). */
 static short CurrentFinestBlockSize(void) {
-	return gHasColorQD ? 1 : 2;
+	return ShouldRenderInColor() ? 1 : 2;
 }
 
 /* ShadeBlock()
    Colours a block according to how far up the shared kShadingScale its
-   sample fell. In colour, that's a real colour from the fractal ramp,
-   solid-filled with PaintRect() - correct whether blockRect is a whole
-   coarse-pass block or a single finest-pass pixel, so this one routine
-   still serves every resolution. In monochrome, it's one of QuickDraw's
-   standard dither patterns via FillRect(), exactly as before. */
+   sample fell. In monochrome, that's one of QuickDraw's standard
+   dither patterns via FillRect(), unchanged from before this file
+   supported colour. In colour, it's a direct pixel-memory write via
+   FillIndexedRect() rather than any QuickDraw colour-setting call:
+   shadeLevel already *is* the correct index into our own colour table
+   (BuildFractalColorTable() constructs it that way on purpose), so
+   there's nothing to search for or match - we already know the exact
+   byte we want written. This is the second colour-setting approach
+   tried here. RGBForeColor() searched a colour table for the nearest
+   match against whatever the *current device* happened to be, which
+   without SetGWorld() correctly making our offscreen GWorld's own
+   device current (removed after it crashed - see
+   EnterOffscreenPort()) was very likely still the real screen's
+   device regardless of its actual depth - consistent with real
+   testing (fine at 8-bit, white at 1/2/4-bit, wrong at 16/32-bit).
+   PmForeColor() would have sidestepped that same search, but its
+   Palette Manager glue isn't linked into this project and pulling it
+   in wasn't chased down. Writing the byte directly avoids both: no
+   device dependency, no Palette Manager dependency, nothing to link. */
 static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
-	if (gHasColorQD) {
-		RGBColor color = ColorForShadeLevel(shadeLevel);
-		RGBForeColor(&color);
-		PaintRect(blockRect);
+	if (ShouldRenderInColor()) {
+		FillIndexedRect(blockRect, shadeLevel);
 		return;
 	}
 	
@@ -366,6 +410,29 @@ static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
 		FillRect(blockRect, ltGray);
 	else
 		FillRect(blockRect, white);
+}
+
+/* FillIndexedRect()
+   Writes shadeLevel directly into every pixel byte of blockRect in
+   the offscreen GWorld's own pixel memory - only ever called once
+   ShouldRenderInColor() is true, so the GWorld (8 bits per pixel, one
+   byte per pixel) is known to exist and be locked. rowBytes carries
+   two flag bits above the actual per-row byte count for a genuine
+   PixMap (the same bits CopyBits() itself relies on elsewhere in this
+   file to recognise a PixMap masquerading as a BitMap), so those are
+   masked off before use. */
+static void FillIndexedRect(const Rect *blockRect, short shadeLevel) {
+	PixMapHandle	pixMap   = ((CGrafPtr) offscreenGWorld)->portPixMap;
+	Ptr				baseAddr = (**pixMap).baseAddr;
+	long			rowBytes = (**pixMap).rowBytes & 0x3FFF;
+	short			row, column;
+	
+	for (row = blockRect->top; row < blockRect->bottom; row++) {
+		unsigned char *rowStart = (unsigned char *) baseAddr + (long) row * rowBytes + blockRect->left;
+		
+		for (column = blockRect->left; column < blockRect->right; column++)
+			*rowStart++ = (unsigned char) shadeLevel;
+	}
 }
 
 /* DrawFractalDirectly()
