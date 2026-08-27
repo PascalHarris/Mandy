@@ -33,20 +33,20 @@ extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
    before yielding back to the event loop. Smaller keeps the app
    checking for input more often (smoother, more responsive); larger
    finishes a render sooner but leaves longer gaps between input
-   checks - though real timing (see below) suggests that trade-off
-   matters less than it looks: real render times before and after
-   region-limited blitting were statistically indistinguishable,
-   meaning per-tick blit cost was never the dominant factor, and each
-   tick still carries fixed overhead regardless of blit cost (the
-   GetPort()/SetPort() dance, EnterOffscreenPort()/EnterWindowPort(),
-   the changedRect bookkeeping) that a larger batch amortises across
-   more actual work. Raised from 4 to 16 on that basis. Even at 16, a
-   950+ second render still yields thousands of times over its
-   course, so Command-period responsiveness shouldn't be
-   noticeably affected - but this is a real trade-off, not a free
-   win, and worth watching if the render ever feels unresponsive. */
+   checks - though real timing suggests that trade-off matters less
+   than it looks: raising this from 4 to 16 alongside the adaptive
+   iteration ceiling and float precision changes below took real
+   render times from roughly 1000 seconds to roughly 250 - a large
+   enough combined win that per-tick overhead clearly wasn't the
+   limiting factor even at 16. Raised again to 32 on that basis, to
+   re-test the balance now that the underlying cost per tick has
+   dropped so much. Even at 32, a real render still yields many
+   thousands of times over its course, so Command-period
+   responsiveness shouldn't be noticeably affected - but this is a
+   real trade-off, not a free win, and worth watching if the render
+   ever feels unresponsive. */
 #define kBlockGridTargetColumns	4
-#define kBlocksPerIdleSlice		16
+#define kBlocksPerIdleSlice		32
 
 /* Escape-time fractal parameters. kShadingScale is the common range
    both SampleMandelbrot() and SampleJulia() report on, so ShadeBlock()
@@ -58,7 +58,7 @@ extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
    won't reduce a coarse pass's ceiling below - see that function for
    why coarse passes get a reduced ceiling at all. */
 #define kShadingScale			64
-#define kMinimumIterationCeiling	8
+#define kMinimumIterationCeiling	4
 
 #define kMandelbrotZoom			150.0f
 #define kMandelbrotMaxIterations	64
@@ -279,11 +279,22 @@ static short IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short
    The point tested is c = (x,y); z starts at the origin. The image is
    symmetric about the vertical centre, so y is folded to a distance
    from the centre line rather than drawn twice as the original code
-   did. Uses currentIterationCeiling (see
-   UpdateIterationCeilingForCurrentPass()) rather than
-   kMandelbrotMaxIterations directly, so coarse preview passes can run
-   a cheaper, reduced ceiling while the finest pass - which determines
-   the final image - still gets the full one. */
+   did.
+   
+   IterateEscapeTime() runs against currentIterationCeiling (see
+   UpdateIterationCeilingForCurrentPass()), the cheaper, reduced budget
+   coarse preview passes use - but ShadeLevelForIterationCount() always
+   normalizes against the real kMandelbrotMaxIterations, not that
+   reduced value. Normalizing against whatever ceiling actually ran
+   was tried first, and produced wildly different colours pass to
+   pass for the same underlying point - real testing showed this
+   plainly, since log-scaling the same iteration count against a
+   ceiling of 8 versus 64 gives very different results. Always
+   normalizing against the true ceiling keeps colours stable across
+   passes: a point that hits the reduced cap early is treated as if it
+   had genuinely escaped at that count against the real scale - an
+   approximation for the preview, but the same approximation every
+   time, rather than one that shifts as the ceiling grows. */
 static short SampleMandelbrot(short x, short y) {
 	short verticalDistanceFromCentre = y - windowHeight/2;
 	float cRe, cIm;
@@ -297,20 +308,21 @@ static short SampleMandelbrot(short x, short y) {
 	
 	iterationCount = IterateEscapeTime(0.0f, 0.0f, cRe, cIm, currentIterationCeiling);
 	
-	return ShadeLevelForIterationCount(iterationCount, currentIterationCeiling);
+	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
 }
 
 /* SampleJulia()
    The point tested is z's starting value; c is the fixed constant that
-   shapes the Julia set. See SampleMandelbrot() above for why this
-   reads currentIterationCeiling rather than kJuliaMaxIterations
-   directly. */
+   shapes the Julia set. See SampleMandelbrot() above for why
+   IterateEscapeTime() reads currentIterationCeiling but
+   ShadeLevelForIterationCount() always normalizes against the real
+   kJuliaMaxIterations instead. */
 static short SampleJulia(short x, short y) {
 	float zRe = 1.5f * (x - windowWidth/2)  / (0.5f * kJuliaZoom * windowWidth)  + kJuliaOffsetX;
 	float zIm =        (y - windowHeight/2) / (0.5f * kJuliaZoom * windowHeight) + kJuliaOffsetY;
 	short iterationCount = IterateEscapeTime(zRe, zIm, kJuliaConstantRe, kJuliaConstantIm, currentIterationCeiling);
 	
-	return ShadeLevelForIterationCount(iterationCount, currentIterationCeiling);
+	return ShadeLevelForIterationCount(iterationCount, kJuliaMaxIterations);
 }
 
 /* ShadeLevelForIterationCount()
