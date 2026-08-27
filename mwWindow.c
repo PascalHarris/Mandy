@@ -121,6 +121,7 @@ static void			EndRendering(void);
 static short		IterateEscapeTime(double zRe, double zIm, double cRe, double cIm, short maxIterations);
 static short		SampleMandelbrot(short x, short y);
 static short		SampleJulia(short x, short y);
+static short		ShadeLevelForIterationCount(short iterationCount, short maxIterations);
 static RGBColor		ColorForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
 static CTabHandle	BuildFractalColorTable(short entryCount);
@@ -204,11 +205,11 @@ static short IterateEscapeTime(double zRe, double zIm, double cRe, double cIm, s
    The point tested is c = (x,y); z starts at the origin. The image is
    symmetric about the vertical centre, so y is folded to a distance
    from the centre line rather than drawn twice as the original code
-   did. Already reports on the kShadingScale range, since
-   kMandelbrotMaxIterations equals it. */
+   did. */
 static short SampleMandelbrot(short x, short y) {
 	short verticalDistanceFromCentre = y - windowHeight/2;
 	double cRe, cIm;
+	short  iterationCount;
 	
 	if (verticalDistanceFromCentre < 0)
 		verticalDistanceFromCentre = -verticalDistanceFromCentre;
@@ -216,20 +217,41 @@ static short SampleMandelbrot(short x, short y) {
 	cRe = (double) x / kMandelbrotZoom - 2.0;
 	cIm = (double) verticalDistanceFromCentre / kMandelbrotZoom;
 	
-	return IterateEscapeTime(0.0, 0.0, cRe, cIm, kMandelbrotMaxIterations);
+	iterationCount = IterateEscapeTime(0.0, 0.0, cRe, cIm, kMandelbrotMaxIterations);
+	
+	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
 }
 
 /* SampleJulia()
    The point tested is z's starting value; c is the fixed constant that
-   shapes the Julia set. Rescaled from kJuliaMaxIterations down onto
-   kShadingScale so ShadeBlock() doesn't need to know it's much larger
-   than Mandelbrot's. */
+   shapes the Julia set. */
 static short SampleJulia(short x, short y) {
 	double zRe = 1.5 * (x - windowWidth/2)  / (0.5 * kJuliaZoom * windowWidth)  + kJuliaOffsetX;
 	double zIm =       (y - windowHeight/2) / (0.5 * kJuliaZoom * windowHeight) + kJuliaOffsetY;
 	short  iterationCount = IterateEscapeTime(zRe, zIm, kJuliaConstantRe, kJuliaConstantIm, kJuliaMaxIterations);
 	
-	return (short) (((long) iterationCount * kShadingScale) / kJuliaMaxIterations);
+	return ShadeLevelForIterationCount(iterationCount, kJuliaMaxIterations);
+}
+
+/* ShadeLevelForIterationCount()
+   Maps a fractal's raw iteration count onto the shared kShadingScale
+   range using a log curve rather than a straight linear one. Escape
+   times are heavily skewed toward small counts - most exterior points
+   escape almost immediately - so a linear map spends nearly its whole
+   range on iteration counts almost no pixel ever reaches, leaving the
+   overwhelming majority of the exterior indistinguishable from the
+   erased white background. The log curve spreads colour across the
+   counts pixels actually land in instead. Each fractal is mapped
+   against its own maxIterations, rather than being rescaled onto
+   another fractal's scale first, so this one function replaces both
+   the old direct (Mandelbrot) and rescaled (Julia) linear mappings. */
+static short ShadeLevelForIterationCount(short iterationCount, short maxIterations) {
+	double shadeLevel = kShadingScale * log((double) iterationCount + 1.0) / log((double) maxIterations + 1.0);
+	
+	if (shadeLevel > kShadingScale)
+		shadeLevel = kShadingScale;
+	
+	return (short) shadeLevel;
 }
 
 /* The colour ramp shadeLevel is mapped onto, in the same direction as
