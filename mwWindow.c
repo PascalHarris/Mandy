@@ -54,7 +54,7 @@ extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
    ramp (colour) regardless of which fractal's own maxIterations
    produced the value.
    
-   kMinimumIterationCeiling is the floor UpdateIterationCeilingForCurrentPass()
+   kMinimumIterationCeiling is the floor UpdateIterationCeilingForBlockSize()
    won't reduce a coarse pass's ceiling below - see that function for
    why coarse passes get a reduced ceiling at all. */
 #define kShadingScale			64
@@ -117,29 +117,46 @@ static Boolean		offscreenReady = false;
 typedef short (*FractalSampleProc)(short x, short y);
 
 /* The iteration ceiling SampleMandelbrot()/SampleJulia() actually use
-   for whatever pass is currently running - see
-   UpdateIterationCeilingForCurrentPass(). Explicitly set by every
-   caller of either sampler (the progressive job's pass-start/pass-
-   change points, and DrawFractalDirectly()'s fallback path) rather
+   for whatever block is currently being sampled - see
+   UpdateIterationCeilingForBlockSize(). Explicitly set by every
+   caller of either sampler (RenderFractalOffscreen()'s pass
+   transitions, and DrawFractalDirectly()'s fallback path) rather
    than derived implicitly from fractalRenderJob state, since
    DrawFractalDirectly() runs with no progressive job - and hence no
    meaningful fractalRenderJob.blockSize - at all. */
 static short currentIterationCeiling;
 
-
 /* Progressive render job -------------------------------------------
    Tracks an in-progress coarse-to-fine render so AdvanceFractalRender()
    can pick up where it left off each time it's called. There is only
    ever one job at a time; starting a new one (RenderFractalOffscreen())
-   simply overwrites whatever was in progress. */
+   simply overwrites whatever was in progress.
+   
+   Breadth-first across the whole image at every pass: every block at
+   the current size gets shaded before any of them subdivides further
+   - so the entire picture refines together, coming into focus as a
+   whole, rather than one region reaching full detail before the rest
+   are touched.
+   
+   nextBlockIndex is a linear count (0 to columnCount*rowCount-1)
+   rather than a (column,row) pair - MapIndexToQuadrantOrder() turns it
+   into an actual grid position each time, in a recursively-quadrant-
+   grouped order rather than row-major. A plain row-major sweep looks
+   fine at coarse block counts (few enough blocks that a whole pass
+   finishes within one or two screen updates, so the order isn't
+   visible at all), but once a pass has enough blocks to take many
+   visible ticks, row-major becomes a visible left-to-right,
+   top-to-bottom scan - "line by line" - rather than looking like
+   quadrants filling in. long, not short: at the finest colour pass
+   this can run up to width*height (up to 153600 for this project's
+   512x300 image), which overflows a 16-bit short. */
 static struct {
 	Boolean				active;
 	FractalSampleProc	sampleProc;
 	short				blockSize;
 	short				columnCount;
 	short				rowCount;
-	short				nextColumn;
-	short				nextRow;
+	long				nextBlockIndex;
 	unsigned long		startTick;
 	unsigned long		endTick;
 } fractalRenderJob;
@@ -160,12 +177,13 @@ static void			FillIndexedRect(const Rect *blockRect, short shadeLevel);
 static void			DrawFractalDirectly(void);
 static short		BlocksAcross(short span, short blockSize);
 static short		HighestPowerOfTwoAtMost(short n);
+static void			MapIndexToQuadrantOrder(long index, short left, short top, short width, short height, short *outColumn, short *outRow);
 static Boolean		AllocateOffscreenMonoStore(void);
 static Boolean		AllocateOffscreenColorStore(void);
 static Boolean		AllocateOffscreenStore(void);
 static void			DisposeOffscreenStore(void);
 static void			StartProgressiveRender(FractalSampleProc sampleProc);
-static void			UpdateIterationCeilingForCurrentPass(void);
+static void			UpdateIterationCeilingForBlockSize(short blockSize);
 static void			DrawNextBlockAndAdvance(Rect *drawnRect);
 static void			AdvanceToNextBlock(void);
 static void			BeginNextPass(void);
@@ -282,7 +300,7 @@ static short IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short
    did.
    
    IterateEscapeTime() runs against currentIterationCeiling (see
-   UpdateIterationCeilingForCurrentPass()), the cheaper, reduced budget
+   UpdateIterationCeilingForBlockSize()), the cheaper, reduced budget
    coarse preview passes use - but ShadeLevelForIterationCount() always
    normalizes against the real kMandelbrotMaxIterations, not that
    reduced value. Normalizing against whatever ceiling actually ran
@@ -592,6 +610,67 @@ static short HighestPowerOfTwoAtMost(short n) {
 	return powerOfTwo;
 }
 
+/* MapIndexToQuadrantOrder()
+   Turns a linear index into a (column,row) position within a
+   left/top/width/height grid region, visiting cells in a recursively
+   quadrant-grouped order: the whole region splits into up to four
+   quadrants (top-left, top-right, bottom-left, bottom-right, splitting
+   each dimension in half - the earlier half getting the extra cell if
+   that dimension is odd), all of the first quadrant's cells are
+   visited before any of the second's, and so on, with each quadrant
+   splitting the same way in turn. This works for any width/height,
+   not just square or power-of-two ones - a real pass's grid usually
+   isn't either (a 512x300 image's first pass is a 4x3 grid) - by
+   simply letting a 1-wide or 1-tall region skip the quadrants that
+   would otherwise be empty (a 1xN or Nx1 region just splits along its
+   only splittable dimension).
+   
+   True recursion, rather than an explicit stack, is fine here: this
+   always runs to completion in a single call - nothing needs to
+   pause partway through it - and the recursion depth is bounded by
+   roughly log2 of the larger grid dimension, at most about 10 levels
+   even at this project's finest, largest grid. */
+static void MapIndexToQuadrantOrder(long index, short left, short top, short width, short height, short *outColumn, short *outRow) {
+	short	halfWidth, halfHeight, rightWidth, bottomHeight;
+	long	topLeftCount, topRightCount, bottomLeftCount;
+	
+	if (width == 1 && height == 1) {
+		*outColumn = left;
+		*outRow    = top;
+		return;
+	}
+	
+	halfWidth    = (width  + 1) / 2;
+	halfHeight   = (height + 1) / 2;
+	rightWidth   = width  - halfWidth;
+	bottomHeight = height - halfHeight;
+	
+	topLeftCount  = (long) halfWidth  * halfHeight;
+	topRightCount = (long) rightWidth * halfHeight;
+	
+	if (index < topLeftCount) {
+		MapIndexToQuadrantOrder(index, left, top, halfWidth, halfHeight, outColumn, outRow);
+		return;
+	}
+	index -= topLeftCount;
+	
+	if (index < topRightCount) {
+		MapIndexToQuadrantOrder(index, left + halfWidth, top, rightWidth, halfHeight, outColumn, outRow);
+		return;
+	}
+	index -= topRightCount;
+	
+	bottomLeftCount = (long) halfWidth * bottomHeight;
+	
+	if (index < bottomLeftCount) {
+		MapIndexToQuadrantOrder(index, left, top + halfHeight, halfWidth, bottomHeight, outColumn, outRow);
+		return;
+	}
+	index -= bottomLeftCount;
+	
+	MapIndexToQuadrantOrder(index, left + halfWidth, top + halfHeight, rightWidth, bottomHeight, outColumn, outRow);
+}
+
 /* AllocateOffscreenMonoStore()
    Manually allocates a plain BitMap the size of imageStart and wraps
    it in a GrafPort so QuickDraw can target it directly - the classic
@@ -792,24 +871,29 @@ FractalParameters GetFractalParameters(void) {
 	return params;
 }
 
-/* UpdateIterationCeilingForCurrentPass()
-   Coarse passes get overdrawn by finer ones moments later, so they
+/* UpdateIterationCeilingForBlockSize()
+   Coarse blocks get overdrawn by finer ones moments later, so they
    don't need the full iteration ceiling to be useful as a preview - a
    cheaper, reduced one that's still enough to show roughly the right
-   shade is plenty, right up until the finest pass, which determines
-   the final image and must use the real ceiling. The reduction scales
-   with how coarse the current block size is relative to the finest
-   one, floored at kMinimumIterationCeiling so even the coarsest pass
-   still shows some differentiation rather than none.
+   shade is plenty, right up until the finest block size, which
+   determines the final image and must use the real ceiling. The
+   reduction scales with how coarse blockSize is relative to the
+   finest one, floored at kMinimumIterationCeiling so even the
+   coarsest block still shows some differentiation rather than none.
+   Takes blockSize as a parameter, called with fractalRenderJob.blockSize
+   at each pass transition, rather than reading that field internally -
+   a small, harmless indirection that happened to make an earlier,
+   since-abandoned per-region traversal easier to try without
+   reshaping this function too.
    
-   This only reduces the *preview*, not the final result: by the time
-   the finest pass runs, blockSize == finestSize, the reduction factor
-   is 1, and currentIterationCeiling is exactly the fractal's real
-   ceiling - unchanged from before this existed. */
-static void UpdateIterationCeilingForCurrentPass(void) {
+   This only reduces the *preview*, not the final result: at
+   blockSize == finestSize, the reduction factor is 1, and
+   currentIterationCeiling is exactly the fractal's real ceiling -
+   unchanged from before this existed. */
+static void UpdateIterationCeilingForBlockSize(short blockSize) {
 	short fullCeiling = (width == 2) ? kMandelbrotMaxIterations : kJuliaMaxIterations;
 	short finestSize  = CurrentFinestBlockSize();
-	short reduction   = fractalRenderJob.blockSize / finestSize;
+	short reduction   = blockSize / finestSize;
 	short reduced     = fullCeiling / reduction;
 	
 	if (reduced < kMinimumIterationCeiling)
@@ -836,26 +920,33 @@ static void StartProgressiveRender(FractalSampleProc sampleProc) {
 	if (fractalRenderJob.blockSize < finestSize)
 		fractalRenderJob.blockSize = finestSize;
 	
-	fractalRenderJob.columnCount = BlocksAcross(imageWidth,  fractalRenderJob.blockSize);
-	fractalRenderJob.rowCount    = BlocksAcross(imageHeight, fractalRenderJob.blockSize);
-	fractalRenderJob.nextColumn  = 0;
-	fractalRenderJob.nextRow     = 0;
-	UpdateIterationCeilingForCurrentPass();
+	fractalRenderJob.columnCount     = BlocksAcross(imageWidth,  fractalRenderJob.blockSize);
+	fractalRenderJob.rowCount        = BlocksAcross(imageHeight, fractalRenderJob.blockSize);
+	fractalRenderJob.nextBlockIndex  = 0;
+	UpdateIterationCeilingForBlockSize(fractalRenderJob.blockSize);
 	BeginRendering();
 }
 
 /* DrawNextBlockAndAdvance()
-   Samples and shades the single next block in the job, then moves the
-   job on to the following block (or the next pass, or completion).
-   Assumes the offscreen port is already current. Reports the block's
-   (clipped) rect via drawnRect, so AdvanceFractalRender() can union
-   it with whatever else it draws in the same call and blit only that
-   combined region afterward, rather than the whole image. */
+   Samples and shades the single next block in the current pass, then
+   moves on to the following block (or the next, finer pass, or
+   completion). "Next" is in quadrant order - see
+   MapIndexToQuadrantOrder() - not row-major. Assumes the offscreen
+   port is already current. Reports the block's (clipped) rect via
+   drawnRect, so AdvanceFractalRender() can union it with whatever
+   else it draws in the same call and blit only that combined region
+   afterward, rather than the whole image. */
 static void DrawNextBlockAndAdvance(Rect *drawnRect) {
 	Rect	blockRect, clippedRect;
 	short	sampleX, sampleY;
-	short	left = fractalRenderJob.nextColumn * fractalRenderJob.blockSize;
-	short	top  = fractalRenderJob.nextRow    * fractalRenderJob.blockSize;
+	short	column, row;
+	short	left, top;
+	
+	MapIndexToQuadrantOrder(fractalRenderJob.nextBlockIndex, 0, 0,
+			fractalRenderJob.columnCount, fractalRenderJob.rowCount, &column, &row);
+	
+	left = column * fractalRenderJob.blockSize;
+	top  = row    * fractalRenderJob.blockSize;
 	
 	SetRect(&blockRect, left, top, left + fractalRenderJob.blockSize, top + fractalRenderJob.blockSize);
 	SectRect(&blockRect, &offscreenBounds, &clippedRect);
@@ -871,35 +962,38 @@ static void DrawNextBlockAndAdvance(Rect *drawnRect) {
 }
 
 /* AdvanceToNextBlock()
-   Moves the job to the next column, wrapping to the next row, and on
-   to the next (finer) pass once a whole row/column grid is done. */
+   Moves the job on to the next index in quadrant order, or on to the
+   next (finer) pass once every block in the current pass has been
+   drawn. */
 static void AdvanceToNextBlock(void) {
-	if (++fractalRenderJob.nextColumn < fractalRenderJob.columnCount)
-		return;
+	fractalRenderJob.nextBlockIndex++;
 	
-	fractalRenderJob.nextColumn = 0;
-	if (++fractalRenderJob.nextRow < fractalRenderJob.rowCount)
+	if (fractalRenderJob.nextBlockIndex < (long) fractalRenderJob.columnCount * fractalRenderJob.rowCount)
 		return;
 	
 	BeginNextPass();
 }
 
 /* BeginNextPass()
-   Halves the block size and rebuilds the grid for the next, finer
-   pass - or marks the job finished once blocks are already as fine as
-   CurrentFinestBlockSize() allows. */
+   Halves the block size and rebuilds the whole-image grid for the
+   next, finer pass - or marks the job finished once blocks are
+   already as fine as CurrentFinestBlockSize() allows. Every block at
+   the current size is shaded before any of them subdivides further,
+   so the whole image refines together, pass by pass, rather than one
+   region reaching full detail while the rest wait - two earlier
+   attempts at a per-region "resolve this one fully, then the next"
+   traversal both turned out not to be what was actually wanted here. */
 static void BeginNextPass(void) {
 	if (fractalRenderJob.blockSize <= CurrentFinestBlockSize()) {
 		EndRendering();
 		return;
 	}
 	
-	fractalRenderJob.blockSize  /= 2;
-	fractalRenderJob.columnCount = BlocksAcross(offscreenBounds.right  - offscreenBounds.left, fractalRenderJob.blockSize);
-	fractalRenderJob.rowCount    = BlocksAcross(offscreenBounds.bottom - offscreenBounds.top,  fractalRenderJob.blockSize);
-	fractalRenderJob.nextColumn  = 0;
-	fractalRenderJob.nextRow     = 0;
-	UpdateIterationCeilingForCurrentPass();
+	fractalRenderJob.blockSize     /= 2;
+	fractalRenderJob.columnCount     = BlocksAcross(offscreenBounds.right  - offscreenBounds.left, fractalRenderJob.blockSize);
+	fractalRenderJob.rowCount        = BlocksAcross(offscreenBounds.bottom - offscreenBounds.top,  fractalRenderJob.blockSize);
+	fractalRenderJob.nextBlockIndex  = 0;
+	UpdateIterationCeilingForBlockSize(fractalRenderJob.blockSize);
 }
 
 /* EnterOffscreenPort()/EnterWindowPort()
