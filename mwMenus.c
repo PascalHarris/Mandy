@@ -59,13 +59,16 @@ void SetUpMenus(void) {
    comes up or goes away. Our application doesn't do anything with 
    the Edit menu.
    
-   Save As is disabled while a render is actively in progress, since
-   the offscreen store it would read is still being written to -
-   see IsRenderActive() in mwWindow.c. A finished OR aborted render
-   leaves it enabled either way, since GetOffscreenImage() (which
-   Save As reads from) doesn't distinguish those two - whatever's in
-   the buffer is fair game to save once nothing is actively changing
-   it. */
+   Save As and Animate are both disabled while a render is actively in
+   progress - Save As because the offscreen store it would read is
+   still being written to; Animate because AnimationTask() (see
+   mwColorCycle.c) already declines to do anything mid-render anyway,
+   so disabling the item just makes that visible rather than letting
+   it look like a click did nothing. Both use IsRenderActive() in
+   mwWindow.c. A finished OR aborted render leaves them enabled either
+   way - Save As because GetOffscreenImage() doesn't distinguish those
+   two, and Animate because there's a real, if partial, image to
+   animate regardless of how the render ended. */
 static void enable (MenuHandle menu, short item, short ok);
 
 void AdjustMenus(void) {
@@ -82,6 +85,8 @@ void AdjustMenus(void) {
     enable(fileMenu, openItem, !((WindowPeek) mwWindow)->visible);
     enable(fileMenu, closeItem, DA || ((WindowPeek) mwWindow)->visible);
     enable(fileMenu, saveAsItem, !IsRenderActive());
+    
+    enable(fractalMenu, animateItem, !IsRenderActive());
     
     //	CheckItem(widthMenu, width, true);
 }

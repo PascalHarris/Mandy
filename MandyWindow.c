@@ -17,6 +17,20 @@ extern	Rect		dragRect;
 
 Boolean	gHasColorQD;
 
+/* Arrow key character codes - the low byte of a keyDown/autoKey
+   event's message field when the key pressed is an arrow key, with no
+   modifiers changing it. These are long-standing, fixed values (in
+   use since the original 128K Mac) rather than anything tied to a
+   particular header set, so they're given directly here instead of
+   relying on a symbolic constant that may or may not be defined in
+   this project's (System 6/7-era) headers - the same reasoning
+   that's kept this project away from newer, occasionally-unlinked
+   Toolbox calls elsewhere (see mwColorCycle.c). */
+#define kLeftArrowKeyCode	0x1C
+#define kRightArrowKeyCode	0x1D
+#define kUpArrowKeyCode		0x1E
+#define kDownArrowKeyCode	0x1F
+
 void InitMacintosh(void);
 void HandleMouseDown (EventRecord	*theEvent);
 void HandleEvent(void);
@@ -146,6 +160,13 @@ void HandleEvent(void) {
                         AdjustMenus();
                         HandleMenu(MenuKey(keyChar));
                     }
+                } else {
+                    unsigned char keyCode = (unsigned char) (theEvent.message & charCodeMask);
+                    
+                    if (keyCode == kUpArrowKeyCode || keyCode == kRightArrowKeyCode)
+                        AnimationArrowKeyPressed(true);
+                    else if (keyCode == kDownArrowKeyCode || keyCode == kLeftArrowKeyCode)
+                        AnimationArrowKeyPressed(false);
                 }
                 break;
                 

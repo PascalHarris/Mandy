@@ -48,7 +48,14 @@ static unsigned long	gLastAnimationTick = 0;
    so nothing here ever resets this back to 0. */
 static short			gPatternPhase = 0;
 
-static void RotateColorTable(CTabHandle table);
+/* Which way continuous animation currently runs, and which way a
+   single arrow-key step goes while it's stopped - see
+   AnimationArrowKeyPressed(). Defaults to forward, matching the
+   direction animation always ran before this existed. */
+static Boolean			gAnimationDirectionForward = true;
+
+static void RotateColorTable(CTabHandle table, Boolean forward);
+static void AdvanceOneFrame(Boolean forward);
 
 void ToggleAnimation(void) {
 	gAnimating = !gAnimating;
@@ -84,18 +91,53 @@ void AnimationTask(void) {
 	
 	gLastAnimationTick = now;
 	
+	AdvanceOneFrame(gAnimationDirectionForward);
+}
+
+/* AnimationArrowKeyPressed()
+   See mwColorCycle.h. forward is true for up/right, false for
+   down/left (MandyWindow.c's HandleEvent() maps the actual key codes).
+   
+   Always records the new direction, even while animation is running
+   and stopped, so continuous animation (AnimationTask()) picks it up
+   on its very next tick regardless of which state it's in when the
+   key is pressed.
+   
+   If animation is already running, that's all this does - the
+   direction change is enough, and AdvanceOneFrame() shouldn't fire
+   twice in the same brief window (once here, once from the next
+   scheduled tick). If animation is stopped, this instead steps
+   exactly one frame immediately, so arrow keys work as a manual
+   frame-by-frame control without needing continuous animation
+   running at all. */
+void AnimationArrowKeyPressed(Boolean forward) {
+	gAnimationDirectionForward = forward;
+	
+	if (gAnimating)
+		return;
+	
+	if (IsRenderActive() || !IsAnimationAvailable())
+		return;
+	
+	AdvanceOneFrame(forward);
+}
+
+/* AdvanceOneFrame()
+   Rotates the colour table, or steps the mono pattern phase, by
+   exactly one frame in the given direction, then shows the result.
+   Shared by the continuous animation tick (AnimationTask()) and the
+   single-step arrow-key handler (AnimationArrowKeyPressed()) - both
+   do exactly this, just on different triggers. */
+static void AdvanceOneFrame(Boolean forward) {
 	if (IsRenderingInColor()) {
 		CTabHandle table = GetOffscreenColorTable();
 		
 		if (table == NULL)
 			return;
 		
-		RotateColorTable(table);
+		RotateColorTable(table, forward);
 	} else {
-		if (!EnableMonoShadeLevelTracking())
-			return;
-		
-		gPatternPhase++;
+		gPatternPhase += forward ? 1 : -1;
 		ApplyMonoPatternPhase(gPatternPhase);
 	}
 	
@@ -103,25 +145,27 @@ void AnimationTask(void) {
 }
 
 /* RotateColorTable()
-   Shifts every entry's RGB down by one slot, the last entry wrapping
-   around to become the first - a standard colour-cycling rotation.
-   Directly mutates the offscreen GWorld's own colour table (see
-   GetOffscreenColorTable()) rather than going through SetGWorld() or
-   any Palette Manager call: SetGWorld() is confirmed, from earlier
-   testing on this project, to crash on real hardware, and the Palette
-   Manager routines this feature was originally specified with
-   (SetPalette(), PmForeColor()'s family) aren't linked into this
-   project and pulling them in wasn't chased down (see ShadeBlock() in
-   mwWindow.c for the same conclusion reached the same way). Directly
-   mutating the CTabHandle's own entries needs neither - the next
-   CopyBits() (via RefreshWholeDisplay()) reads whatever this table
-   currently holds regardless of which device or port is current.
+   Shifts every entry's RGB by one slot - forward wraps the last entry
+   around to become the first; backward is the exact reverse, wrapping
+   the first entry around to become the last - a standard colour-
+   cycling rotation, run either direction. Directly mutates the
+   offscreen GWorld's own colour table (see GetOffscreenColorTable())
+   rather than going through SetGWorld() or any Palette Manager call:
+   SetGWorld() is confirmed, from earlier testing on this project, to
+   crash on real hardware, and the Palette Manager routines this
+   feature was originally specified with (SetPalette(), PmForeColor()'s
+   family) aren't linked into this project and pulling them in wasn't
+   chased down (see ShadeBlock() in mwWindow.c for the same conclusion
+   reached the same way). Directly mutating the CTabHandle's own
+   entries needs neither - the next CopyBits() (via
+   RefreshWholeDisplay()) reads whatever this table currently holds
+   regardless of which device or port is current.
    
    Reads the entry count from the table itself (ctSize is count-1)
    rather than assuming a fixed range, so this stays correct if the
    fractal colour ramp's own entry count (kShadingScale+1, in
    mwWindow.c) ever changes. */
-static void RotateColorTable(CTabHandle table) {
+static void RotateColorTable(CTabHandle table, Boolean forward) {
 	short		entryCount = (**table).ctSize + 1;
 	RGBColor	wrapped;
 	short		i;
@@ -129,12 +173,21 @@ static void RotateColorTable(CTabHandle table) {
 	if (entryCount < 2)
 		return;
 	
-	wrapped = (**table).ctTable[entryCount - 1].rgb;
-	
-	for (i = entryCount - 1; i > 0; i--)
-		(**table).ctTable[i].rgb = (**table).ctTable[i - 1].rgb;
-	
-	(**table).ctTable[0].rgb = wrapped;
+	if (forward) {
+		wrapped = (**table).ctTable[entryCount - 1].rgb;
+		
+		for (i = entryCount - 1; i > 0; i--)
+			(**table).ctTable[i].rgb = (**table).ctTable[i - 1].rgb;
+		
+		(**table).ctTable[0].rgb = wrapped;
+	} else {
+		wrapped = (**table).ctTable[0].rgb;
+		
+		for (i = 0; i < entryCount - 1; i++)
+			(**table).ctTable[i].rgb = (**table).ctTable[i + 1].rgb;
+		
+		(**table).ctTable[entryCount - 1].rgb = wrapped;
+	}
 	
 	/* Tells QuickDraw this table's contents changed by giving it a
 	   fresh seed value - it can cache colour-matching results keyed

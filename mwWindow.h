@@ -65,24 +65,17 @@ Boolean IsRenderingInColor(void);
    colours or patterns, without going through an actual update event. */
 void RefreshWholeDisplay(void);
 
-/* Allocates the byte-per-finest-cell shade-level buffer the mono
-   pattern-cycling path needs (see ApplyMonoPatternPhase()) if it
-   hasn't been already. Only meaningful when not rendering in colour;
-   harmless but wasteful to call otherwise. Returns false if the
-   allocation failed - mwColorCycle.c should decline to start
-   animating in that case rather than call ApplyMonoPatternPhase()
-   with nothing behind it. Idempotent: once allocated, later calls
-   just return true immediately. */
-Boolean EnableMonoShadeLevelTracking(void);
-
 /* Redraws every finest-size cell of the mono offscreen image using
    its already-known shade level (recorded by ShadeBlock() during
    normal rendering - see RecordMonoShadeLevels() in mwWindow.c) and
    the given phase, then leaves the result in the offscreen store for
-   the caller to blit via RefreshWholeDisplay(). No fractal math runs
-   here - only pattern lookups and FillRect calls - which is what
-   keeps this cheap enough to repeat every couple of ticks. Does
-   nothing if EnableMonoShadeLevelTracking() hasn't succeeded, or if a
+   the caller to blit via RefreshWholeDisplay(). Coalesces runs of
+   same-band cells into single fills rather than one call per cell -
+   still a real redraw (there's no indirection to exploit the way a
+   rotated colour table gives colour animation), but the cheapest one
+   available: pattern lookups and FillRect calls, never the fractal
+   maths itself. Does nothing if the shade-level buffer doesn't exist
+   (the offscreen store failed to allocate under low memory) or if a
    render is currently in progress (the recorded shade levels would be
    a mix of old and not-yet-updated values mid-render). */
 void ApplyMonoPatternPhase(short phase);
