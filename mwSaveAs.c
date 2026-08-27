@@ -75,14 +75,22 @@ void SaveFractalAsPICT(void) {
    Wraps the offscreen image's existing pixel data as a PICT, via the
    standard OpenPicture()/ClosePicture() recording technique: any
    QuickDraw call made between the two is captured as picture opcodes
-   rather than actually drawn. Using sourceBits as both the source and
-   destination of the CopyBits() is deliberate, not a mistake - during
-   recording it's the call's parameters that matter, not a real pixel
-   copy, and this is the standard way to capture existing pixel data
-   as a picture without needing a separate real destination. Needs
-   some real, valid port current to record into (mwWindow here), even
-   though what ends up in the picture is entirely determined by
-   sourceBits/sourceBounds instead. */
+   instead of actually being drawn on screen.
+   
+   The CopyBits() destination is mwWindow's own portBits - the exact
+   same call shape BlitOffscreenToWindow() already uses successfully
+   every time the window redraws - rather than sourceBits used as both
+   source and destination. That self-copy was the original approach
+   here, on the reasoning that only the call's parameters matter during
+   recording, not a real pixel copy; Apple's own Technical Note #405
+   documents almost that exact pattern - CopyBits(myWindow^.portBits,
+   myWindow^.portBits, ...) during recording - producing an empty
+   result, with the destination pixel data ending up blank. Recording
+   redirects the operation rather than performing it for real, so
+   mwWindow's actual on-screen content shouldn't be affected either
+   way; this just reuses a call already proven to transfer the right
+   pixels, instead of the one shape Apple's own documentation shows
+   misbehaving. */
 static PicHandle RecordPicture(const BitMap *sourceBits, const Rect *sourceBounds) {
 	PicHandle	picture;
 	GrafPtr		savedPort;
@@ -92,7 +100,7 @@ static PicHandle RecordPicture(const BitMap *sourceBits, const Rect *sourceBound
 	
 	picture = OpenPicture(sourceBounds);
 	if (picture != NULL)
-		CopyBits(sourceBits, sourceBits, sourceBounds, sourceBounds, srcCopy, NULL);
+		CopyBits(sourceBits, &mwWindow->portBits, sourceBounds, sourceBounds, srcCopy, NULL);
 	ClosePicture();
 	
 	SetPort(savedPort);
