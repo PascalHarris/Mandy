@@ -114,6 +114,8 @@ static struct {
 	short				rowCount;
 	short				nextColumn;
 	short				nextRow;
+	unsigned long		startTick;
+	unsigned long		endTick;
 } fractalRenderJob;
 
 static void			BeginRendering(void);
@@ -126,7 +128,6 @@ static RGBColor		ColorForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
 static CTabHandle	BuildFractalColorTable(short entryCount);
 static short		CurrentFinestBlockSize(void);
-static short		CurrentScreenDepth(void);
 static Boolean		ShouldRenderInColor(void);
 static void			ShadeBlock(const Rect *blockRect, short shadeLevel);
 static void			FillIndexedRect(const Rect *blockRect, short shadeLevel);
@@ -342,7 +343,7 @@ static CTabHandle BuildFractalColorTable(short entryCount) {
    next render rather than needing a relaunch. Assumes a single
    display, matching the simplification already made elsewhere for
    this app's fixed small window. */
-static short CurrentScreenDepth(void) {
+short CurrentScreenDepth(void) {
 	GDHandle		mainDevice       = GetMainDevice();
 	PixMapHandle	mainDevicePixMap = (**mainDevice).gdPMap;
 	
@@ -603,12 +604,85 @@ static void BeginRendering(void) {
 static void EndRendering(void) {
 	GrafPtr savedPort;
 	
-	fractalRenderJob.active = false;
+	fractalRenderJob.active  = false;
+	fractalRenderJob.endTick = TickCount();
 	
 	GetPort(&savedPort);
 	SetPort(mwWindow);
 	SetWTitle(mwWindow, kIdleWindowTitle);
 	SetPort(savedPort);
+}
+
+/* IsRenderActive()
+   Whether a render is currently under way - used both by the Get Info
+   window (to choose "rendering..." vs "render time") and by
+   mwMenus.c's AdjustMenus() to grey out Save As while a render is in
+   progress, since the offscreen store is still being written to. */
+Boolean IsRenderActive(void) {
+	return fractalRenderJob.active;
+}
+
+/* RenderElapsedTicks()
+   Ticks (60ths of a second) the current or most recent render has
+   taken: live, counted from startTick, while active; fixed, from the
+   startTick/endTick pair EndRendering() recorded, once it's finished -
+   whether that's by completing normally or being aborted. Aborting
+   deliberately leaves the image and its timing exactly as they were
+   at that point, rather than clearing either. */
+unsigned long RenderElapsedTicks(void) {
+	if (fractalRenderJob.active)
+		return TickCount() - fractalRenderJob.startTick;
+	
+	return fractalRenderJob.endTick - fractalRenderJob.startTick;
+}
+
+/* CurrentFractalName()
+   A display name for whatever "width" currently selects. Matches
+   DrawCurrentFractal()-style dispatch elsewhere in this file, just
+   for display rather than drawing. */
+ConstStr255Param CurrentFractalName(void) {
+	if (width == 1)
+		return "\pTree";
+	if (width == 2)
+		return "\pMandelbrot";
+	if (width == 3)
+		return "\pJulia";
+	
+	return "\p(none selected)";
+}
+
+/* GetFractalResolution()
+   The image's current width and height in pixels. A function rather
+   than exposing windowWidth/windowHeight directly, since those are
+   fixed #defines today but won't necessarily stay fixed once the
+   resizing work (#5) lands. */
+void GetFractalResolution(short *outWidth, short *outHeight) {
+	*outWidth  = windowWidth;
+	*outHeight = windowHeight;
+}
+
+/* GetFractalParameters()
+   See the FractalParameters comment in mwWindow.h for which fields
+   apply to which fractal. */
+FractalParameters GetFractalParameters(void) {
+	FractalParameters params;
+	
+	params.zoom          = 0.0;
+	params.maxIterations = 0;
+	params.constantRe    = 0.0;
+	params.constantIm    = 0.0;
+	
+	if (width == 2) {
+		params.zoom          = kMandelbrotZoom;
+		params.maxIterations = kMandelbrotMaxIterations;
+	} else if (width == 3) {
+		params.zoom          = kJuliaZoom;
+		params.maxIterations = kJuliaMaxIterations;
+		params.constantRe    = kJuliaConstantRe;
+		params.constantIm    = kJuliaConstantIm;
+	}
+	
+	return params;
 }
 
 /* StartProgressiveRender()
@@ -708,27 +782,46 @@ static void EnterWindowPort(void) {
 	SetPort(mwWindow);
 }
 
+/* GetOffscreenImage()
+   Hands back the offscreen store's pixel data and bounds for whatever
+   is currently rendered - complete, partial, or aborted, it doesn't
+   matter here; this just describes whatever is actually in the
+   buffer right now. Used by BlitOffscreenToWindow() below and by
+   Save As (mwSaveAs.c). Returns false, leaving *bits/*bounds
+   untouched, if there's no offscreen store at all (allocation failed
+   under low memory).
+   
+   &mwWindow->portBits-style coercion isn't needed here the way it is
+   for the window: offscreenGWorld's own portBits works the same way
+   for the identical documented reason (a CGrafPtr coerced to GrafPtr
+   and read as .portBits is how Inside Macintosh says to get a
+   CopyBits-compatible pointer from a colour port), it's just a
+   different backing store than the window, hence the branch. */
+Boolean GetOffscreenImage(BitMap **bits, Rect *bounds) {
+	if (!offscreenReady)
+		return false;
+	
+	*bits   = gHasColorQD ? &((GrafPtr) offscreenGWorld)->portBits : &offscreenBits;
+	*bounds = offscreenBounds;
+	return true;
+}
+
 /* BlitOffscreenToWindow()
    Copies the offscreen store onto the window. Assumes the caller has
    already called EnterWindowPort() (both DrawContent() and
    AdvanceFractalRender() do this themselves, since each needs the
-   port/device set for its own reasons too).
-   
-   &mwWindow->portBits works as the destination in both colour and
-   monochrome without an explicit branch: mwWindow's C type has always
-   been WindowPtr (= GrafPtr), and Inside Macintosh documents coercing
-   a CGrafPtr to a GrafPtr and reading .portBits as the correct,
-   intentional way to get a CopyBits-compatible pointer from a colour
-   port - QuickDraw recognises it's really a PixMap by the high bits
-   left set at that offset. The source needs the explicit branch since
-   it's one of two genuinely different backing stores. */
+   port/device set for its own reasons too). */
 static void BlitOffscreenToWindow(void) {
-    BitMap *sourceBits = gHasColorQD ? &((GrafPtr) offscreenGWorld)->portBits : &offscreenBits;
+    BitMap	*sourceBits;
+    Rect	sourceBounds;
+    
+    if (!GetOffscreenImage(&sourceBits, &sourceBounds))
+        return;
     
     if (!((WindowPeek) mwWindow)->visible)
         return;
     
-    CopyBits(sourceBits, &mwWindow->portBits, &offscreenBounds, &imageStart, srcCopy, NULL);
+    CopyBits(sourceBits, &mwWindow->portBits, &sourceBounds, &imageStart, srcCopy, NULL);
 }
 
 /* RenderFractalOffscreen()
@@ -749,6 +842,7 @@ void RenderFractalOffscreen(void) {
     GrafPtr	savedPort;
     
     GetPort(&savedPort);
+    fractalRenderJob.startTick = TickCount();
     
     if (!offscreenReady && !AllocateOffscreenStore()) {
         EndRendering();

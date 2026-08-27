@@ -7,6 +7,8 @@
 
 #include "mwMenus.h"
 #include "mwWindow.h"
+#include "mwInfo.h"
+#include "mwSaveAs.h"
 
 extern	WindowPtr mwWindow;
 extern	int	width;
@@ -24,7 +26,9 @@ enum {
 enum {
     openItem = 1,
     closeItem,
-    quitItem = 4
+    getInfoItem = 4,
+    saveAsItem,
+    quitItem = 7
 };
 
 
@@ -38,7 +42,7 @@ void SetUpMenus(void) {
    	InsertMenu(fractalMenu = NewMenu(fractalID, "\pFractal"), 0);
     DrawMenuBar();
     AddResMenu(appleMenu, 'DRVR');
-    AppendMenu(fileMenu, "\pOpen/O;Close/W;(-;Quit/Q");
+    AppendMenu(fileMenu, "\pOpen/O;Close/W;(-;Get Info/I;Save As...;(-;Quit/Q");
     AppendMenu(editMenu, "\pUndo/Z;(-;Cut/X;Copy/C;Paste/V;Clear");
     AppendMenu(fractalMenu, "\pTree/T;Mandelbrot/M;Julia/J");
 }
@@ -46,7 +50,15 @@ void SetUpMenus(void) {
 /* AdjustMenus()
    Enable or disable the items in the Edit menu if a DA window
    comes up or goes away. Our application doesn't do anything with 
-   the Edit menu. */
+   the Edit menu.
+   
+   Save As is disabled while a render is actively in progress, since
+   the offscreen store it would read is still being written to -
+   see IsRenderActive() in mwWindow.c. A finished OR aborted render
+   leaves it enabled either way, since GetOffscreenImage() (which
+   Save As reads from) doesn't distinguish those two - whatever's in
+   the buffer is fair game to save once nothing is actively changing
+   it. */
 static void enable (MenuHandle menu, short item, short ok);
 
 void AdjustMenus(void) {
@@ -62,6 +74,7 @@ void AdjustMenus(void) {
     
     enable(fileMenu, openItem, !((WindowPeek) mwWindow)->visible);
     enable(fileMenu, closeItem, DA || ((WindowPeek) mwWindow)->visible);
+    enable(fileMenu, saveAsItem, !IsRenderActive());
     
     //	CheckItem(widthMenu, width, true);
 }
@@ -108,6 +121,14 @@ void HandleMenu (long mSelect) {
                     CloseDeskAcc(frontWindow->windowKind);
                 else if ((frontWindow = (WindowPeek) mwWindow) != NULL)
                     HideWindow(mwWindow);
+                break;
+                
+            case getInfoItem:
+                ShowInfoWindow();
+                break;
+                
+            case saveAsItem:
+                SaveFractalAsPICT();
                 break;
                 
             case quitItem:

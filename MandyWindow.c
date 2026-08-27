@@ -8,6 +8,7 @@
 
 #include "mwMenus.h"
 #include "mwWindow.h"
+#include "mwInfo.h"
 #include <GestaltEqu.h>
 
 extern	WindowPtr	mwWindow;
@@ -90,6 +91,8 @@ void HandleMouseDown (EventRecord *theEvent) {
         case inDrag:
             if (theWindow == mwWindow)
                 DragWindow(mwWindow, theEvent->where, &dragRect);
+            else if (IsInfoWindow(theWindow))
+                DragWindow(theWindow, theEvent->where, &dragRect);
             break;
             
         case inContent:
@@ -98,6 +101,11 @@ void HandleMouseDown (EventRecord *theEvent) {
                     SelectWindow(mwWindow);
                 else
                     InvalRect(&mwWindow->portRect);
+            } else if (IsInfoWindow(theWindow)) {
+                if (theWindow != FrontWindow())
+                    SelectWindow(theWindow);
+                else
+                    HandleInfoWindowClick(theEvent->where);
             }
             break;
             
@@ -105,6 +113,9 @@ void HandleMouseDown (EventRecord *theEvent) {
             if (theWindow == mwWindow &&
                 TrackGoAway(mwWindow, theEvent->where))
                 HideWindow(mwWindow);
+            else if (IsInfoWindow(theWindow) &&
+                TrackGoAway(theWindow, theEvent->where))
+                CloseInfoWindow();
             break;
     }
 }
@@ -137,11 +148,20 @@ void HandleEvent(void) {
                 }
                 break;
                 
-            case updateEvt:
-                BeginUpdate(mwWindow);
-                DrawContent(((WindowPeek) mwWindow)->hilited);
-                EndUpdate(mwWindow);
+            case updateEvt: {
+                WindowPtr windowToUpdate = (WindowPtr) theEvent.message;
+                
+                if (windowToUpdate == mwWindow) {
+                    BeginUpdate(mwWindow);
+                    DrawContent(((WindowPeek) mwWindow)->hilited);
+                    EndUpdate(mwWindow);
+                } else if (IsInfoWindow(windowToUpdate)) {
+                    BeginUpdate(windowToUpdate);
+                    DrawInfoWindowContent();
+                    EndUpdate(windowToUpdate);
+                }
                 break;
+            }
                 
             case activateEvt:
                 InvalRect(&mwWindow->portRect);
@@ -149,6 +169,7 @@ void HandleEvent(void) {
         }
     } else {
         AdvanceFractalRender();
+        RefreshInfoWindowIfNeeded();
     }
 }
 
