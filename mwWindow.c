@@ -184,6 +184,105 @@ static unsigned char	*gMonoShadeLevels = NULL;
 static short			gMonoShadeLevelColumns;
 static short			gMonoShadeLevelRows;
 
+/* Default-view cache, for instant "Zoom Out" ------------------------
+   Caches the offscreen image - and, for mono, gMonoShadeLevels
+   alongside it, so Animate keeps working correctly on a restored
+   cache rather than redrawing from shade levels left over from
+   whatever zoomed view was rendered most recently - the moment a
+   render of the current fractal's own default view (see
+   ResetViewForCurrentFractal()) finishes naturally. See
+   CacheOffscreenAsDefaultViewIfApplicable(), called from
+   BeginNextPass() at exactly that point - not from an aborted render
+   (AbortFractalRender()), and not for the Tree, which doesn't use
+   gView at all.
+   
+   One slot only, sized for whichever fractal is currently selected -
+   switching fractals overwrites it with a fresh cache for the newly
+   selected one the moment its own default view finishes rendering,
+   which happens immediately on every fractal switch (see mwMenus.c),
+   so there's never a need to cache more than one fractal's default at
+   once. gDefaultViewCacheWidth (matched against width, this file's
+   own global) records which fractal the cache is actually for, so a
+   restore attempt for the wrong one is refused rather than showing
+   the wrong image. */
+static Ptr				gDefaultViewCachePixels = NULL;
+static long				gDefaultViewCachePixelsSize = 0;
+static unsigned char	*gDefaultViewCacheShadeLevels = NULL;
+static short			gDefaultViewCacheWidth = 0;
+
+/* IsCurrentViewTheDefaultForCurrentFractal()
+   True if gView currently holds exactly the current fractal's own
+   default view - an exact floating-point comparison against the same
+   literal constants ResetViewForCurrentFractal() assigns, which is
+   safe here for the same reason SampleMandelbrot()'s centreIm==0.0
+   check is: gView only ever holds one of these exact literals, or a
+   value computed by the marquee zoom feature's interpolation
+   (mwZoom.c), which would only match by the most remote coincidence. */
+static Boolean IsCurrentViewTheDefaultForCurrentFractal(void) {
+	if (width == 2)
+		return gView.centreRe    == kMandelbrotDefaultCentreRe
+				&& gView.centreIm    == kMandelbrotDefaultCentreIm
+				&& gView.halfWidthRe == kMandelbrotDefaultHalfWidthRe;
+	
+	if (width == 3)
+		return gView.centreRe    == kJuliaDefaultCentreRe
+				&& gView.centreIm    == kJuliaDefaultCentreIm
+				&& gView.halfWidthRe == kJuliaDefaultHalfWidthRe;
+	
+	return false;
+}
+
+/* CacheOffscreenAsDefaultViewIfApplicable()
+   Snapshots the offscreen image (and, for mono, gMonoShadeLevels) into
+   the default-view cache, if the render that just finished was for
+   the current fractal's own default view - called only from
+   BeginNextPass()'s natural-completion branch, so an aborted render
+   never gets cached. A failed allocation just leaves the cache
+   invalid (gDefaultViewCacheWidth left not matching width) rather
+   than caching something partial - RestoreDefaultViewFromCache()
+   already falls back to a full render whenever the cache doesn't
+   apply, so there's nothing else to do here on failure. */
+static void CacheOffscreenAsDefaultViewIfApplicable(void) {
+	BitMap	*bits;
+	Rect	bounds;
+	long	pixelsSize;
+	
+	if (!IsCurrentViewTheDefaultForCurrentFractal())
+		return;
+	
+	if (!GetOffscreenImage(&bits, &bounds))
+		return;
+	
+	pixelsSize = (long) bits->rowBytes * (bounds.bottom - bounds.top);
+	
+	if (gDefaultViewCachePixels == NULL || gDefaultViewCachePixelsSize != pixelsSize) {
+		if (gDefaultViewCachePixels != NULL)
+			DisposePtr(gDefaultViewCachePixels);
+		
+		gDefaultViewCachePixels     = NewPtr(pixelsSize);
+		gDefaultViewCachePixelsSize = pixelsSize;
+	}
+	
+	if (gDefaultViewCachePixels == NULL) {
+		gDefaultViewCacheWidth = 0;
+		return;
+	}
+	
+	BlockMove(bits->baseAddr, gDefaultViewCachePixels, pixelsSize);
+	
+	if (!gHasColorQD && gMonoShadeLevels != NULL) {
+		long shadeLevelsSize = (long) gMonoShadeLevelColumns * gMonoShadeLevelRows;
+		
+		if (gDefaultViewCacheShadeLevels == NULL)
+			gDefaultViewCacheShadeLevels = (unsigned char *) NewPtr(shadeLevelsSize);
+		
+		if (gDefaultViewCacheShadeLevels != NULL)
+			BlockMove(gMonoShadeLevels, gDefaultViewCacheShadeLevels, shadeLevelsSize);
+	}
+	
+	gDefaultViewCacheWidth = width;
+}
+
 /* A fractal sample function reports how "escaped" the point at (x,y)
    is, on the shared kShadingScale range - see SampleMandelbrot() and
    SampleJulia(). */
@@ -967,7 +1066,12 @@ static Boolean AllocateOffscreenStore(void) {
    current image, so it would be the wrong size for whatever gets
    allocated next. AllocateOffscreenMonoStore() reallocates it
    fresh, at whatever new size applies, the next time a mono store is
-   allocated - so nothing needs to eagerly reallocate it here. */
+   allocated - so nothing needs to eagerly reallocate it here.
+   
+   Also frees the default-view cache (see gDefaultViewCachePixels et
+   al.), for the same reason - it's sized for the current image too,
+   and CacheOffscreenAsDefaultViewIfApplicable() rebuilds it fresh the
+   next time the current fractal's default view finishes rendering. */
 static void DisposeOffscreenStore(void) {
     if (offscreenReady) {
         if (gHasColorQD) {
@@ -987,6 +1091,17 @@ static void DisposeOffscreenStore(void) {
         DisposePtr((Ptr) gMonoShadeLevels);
         gMonoShadeLevels = NULL;
     }
+    
+    if (gDefaultViewCachePixels != NULL) {
+        DisposePtr(gDefaultViewCachePixels);
+        gDefaultViewCachePixels     = NULL;
+        gDefaultViewCachePixelsSize = 0;
+    }
+    if (gDefaultViewCacheShadeLevels != NULL) {
+        DisposePtr((Ptr) gDefaultViewCacheShadeLevels);
+        gDefaultViewCacheShadeLevels = NULL;
+    }
+    gDefaultViewCacheWidth = 0;
 }
 
 /* BeginRendering()/EndRendering()
@@ -1221,6 +1336,7 @@ static void AdvanceToNextBlock(void) {
    traversal both turned out not to be what was actually wanted here. */
 static void BeginNextPass(void) {
 	if (fractalRenderJob.blockSize <= CurrentFinestBlockSize()) {
+		CacheOffscreenAsDefaultViewIfApplicable();
 		EndRendering();
 		return;
 	}
@@ -1406,6 +1522,48 @@ void EnsureWindowVisible(void) {
 	
 	ShowWindow(mwWindow);
 	SelectWindow(mwWindow);
+}
+
+/* IsZoomOutAvailable()
+   True while the current fractal (width) actually has a zoomable
+   view to reset - Mandelbrot or Julia. False for the Tree, which
+   doesn't use gView at all, so mwMenus.c can grey out "Zoom Out" for
+   it rather than have it do nothing when clicked. */
+Boolean IsZoomOutAvailable(void) {
+	return (width == 2 || width == 3);
+}
+
+/* RestoreDefaultViewFromCache()
+   See mwWindow.h. Restoring the cache doesn't touch fractalRenderJob
+   or the window title: this can only be reached while IsRenderActive()
+   is already false (mwMenus.c greys out Zoom Out otherwise, matching
+   Animate/Save As), so both are already sitting at "idle" from
+   whatever render last completed, and there's nothing here that needs
+   to change either. */
+Boolean RestoreDefaultViewFromCache(void) {
+	BitMap	*bits;
+	Rect	bounds;
+	
+	if (IsRenderActive())
+		return false;
+	
+	if (gDefaultViewCacheWidth != width || gDefaultViewCachePixels == NULL)
+		return false;
+	
+	if (!GetOffscreenImage(&bits, &bounds))
+		return false;
+	
+	if ((long) bits->rowBytes * (bounds.bottom - bounds.top) != gDefaultViewCachePixelsSize)
+		return false;
+	
+	BlockMove(gDefaultViewCachePixels, bits->baseAddr, gDefaultViewCachePixelsSize);
+	
+	if (!gHasColorQD && gMonoShadeLevels != NULL && gDefaultViewCacheShadeLevels != NULL) {
+		long shadeLevelsSize = (long) gMonoShadeLevelColumns * gMonoShadeLevelRows;
+		BlockMove(gDefaultViewCacheShadeLevels, gMonoShadeLevels, shadeLevelsSize);
+	}
+	
+	return true;
 }
 
 /* BlitOffscreenToWindow()

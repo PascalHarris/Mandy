@@ -35,8 +35,12 @@ enum {
 /* Fractal menu: Tree/Mandelbrot/Julia occupy items 1-3 (their item
    number is width - see HandleMenu()'s fractalID case); item 4 is a
    divider; animateItem is the "Animate"/"Stop Animation" toggle below
-   it - see mwColorCycle.h. */
+   it - see mwColorCycle.h; zoomOutItem, directly below that, resets
+   gView to the current fractal's own default view - see
+   ResetViewForCurrentFractal()/RestoreDefaultViewFromCache() in
+   mwWindow.h. */
 #define animateItem	5
+#define zoomOutItem	6
 
 
 /* SetUpMenus()
@@ -51,7 +55,7 @@ void SetUpMenus(void) {
     AddResMenu(appleMenu, 'DRVR');
     AppendMenu(fileMenu, "\pOpen/O;Close/W;(-;Get Info/I;Save As...;(-;Quit/Q");
     AppendMenu(editMenu, "\pUndo/Z;(-;Cut/X;Copy/C;Paste/V;Clear");
-    AppendMenu(fractalMenu, "\pTree/T;Mandelbrot/M;Julia/J;(-;Animate");
+    AppendMenu(fractalMenu, "\pTree/T;Mandelbrot/M;Julia/J;(-;Animate;Zoom Out");
 }
 
 /* AdjustMenus()
@@ -59,16 +63,17 @@ void SetUpMenus(void) {
    comes up or goes away. Our application doesn't do anything with 
    the Edit menu.
    
-   Save As and Animate are both disabled while a render is actively in
-   progress - Save As because the offscreen store it would read is
-   still being written to; Animate because AnimationTask() (see
+   Save As, Animate, and Zoom Out are all disabled while a render is
+   actively in progress - Save As and Zoom Out because the offscreen
+   store they'd read from or write to is still being written to by
+   the render itself; Animate because AnimationTask() (see
    mwColorCycle.c) already declines to do anything mid-render anyway,
    so disabling the item just makes that visible rather than letting
-   it look like a click did nothing. Both use IsRenderActive() in
+   it look like a click did nothing. All three use IsRenderActive() in
    mwWindow.c. A finished OR aborted render leaves them enabled either
-   way - Save As because GetOffscreenImage() doesn't distinguish those
-   two, and Animate because there's a real, if partial, image to
-   animate regardless of how the render ended.
+   way - Save As and Zoom Out because GetOffscreenImage() doesn't
+   distinguish those two, and Animate because there's a real, if
+   partial, image to animate regardless of how the render ended.
    
    Animate is also disabled outright when IsAnimationAvailable() says
    it wouldn't do anything useful even once a render finishes - the
@@ -79,7 +84,11 @@ void SetUpMenus(void) {
    switching to the Tree while animation is already running from a
    previous fractal never disables the item out from under a running
    "Stop Animation" - it stays clickable to turn off regardless of
-   whether turning it on right now would be available. */
+   whether turning it on right now would be available.
+   
+   Zoom Out is similarly disabled outright for the Tree, via
+   IsZoomOutAvailable() - it doesn't use gView at all, so there's
+   nothing for the item to reset. */
 static void enable (MenuHandle menu, short item, short ok);
 
 void AdjustMenus(void) {
@@ -98,6 +107,7 @@ void AdjustMenus(void) {
     enable(fileMenu, saveAsItem, !IsRenderActive());
     
     enable(fractalMenu, animateItem, !IsRenderActive() && (IsAnimationAvailable() || IsAnimationActive()));
+    enable(fractalMenu, zoomOutItem, !IsRenderActive() && IsZoomOutAvailable());
     
     //	CheckItem(widthMenu, width, true);
 }
@@ -169,6 +179,11 @@ void HandleMenu (long mSelect) {
              if (menuItem == animateItem) {
                  ToggleAnimation();
                  SetItem(fractalMenu, animateItem, IsAnimationActive() ? "\pStop Animation" : "\pAnimate");
+             } else if (menuItem == zoomOutItem) {
+                 ResetViewForCurrentFractal();
+                 if (!RestoreDefaultViewFromCache())
+                     RenderFractalOffscreen();
+                 InvalRect(&mwWindow->portRect);
              } else {
                  EnsureWindowVisible();
                  CheckItem(fractalMenu, width, false);

@@ -142,3 +142,25 @@ void ApplyMonoPatternPhase(short phase);
    so picking a fractal from the menu always has somewhere to show it.
    Does nothing if the window is already visible. */
 void EnsureWindowVisible(void);
+
+/* Support for the Zoom Out menu item (mwMenus.c) ---------------------
+   Restores gView to the current fractal's own default view - reusing
+   an instant, cached copy of that fractal's already-rendered default
+   image when one is available, rather than always re-rendering from
+   scratch. */
+
+/* True while the current fractal (width) actually has a zoomable view
+   to reset - Mandelbrot or Julia, not the Tree. mwMenus.c uses this to
+   grey out Zoom Out rather than have it do nothing when clicked. */
+Boolean IsZoomOutAvailable(void);
+
+/* Restores the offscreen image (and, for mono, the shade-level buffer
+   Animate reads from) from an internally-cached copy of the current
+   fractal's default view, if one exists and matches the offscreen
+   store's current size - letting "Zoom Out" happen instantly instead
+   of triggering a fresh render. Returns false, having changed
+   nothing, if there's no usable cache for the current fractal (see
+   width, extern'd elsewhere) - the caller should fall back to a
+   normal RenderFractalOffscreen() in that case. Doesn't touch gView
+   itself; call ResetViewForCurrentFractal() first. */
+Boolean RestoreDefaultViewFromCache(void);
