@@ -12,6 +12,49 @@ void AdvanceFractalRender(void);
 void AbortFractalRender(void);
 void HandleWindowResized(void);
 
+/* The visible region of the complex plane Mandelbrot and Julia render
+   against - centreRe/centreIm is the middle of the view, halfWidthRe
+   is half its width (so the full visible Re range is centreRe ±
+   halfWidthRe); the visible Im range follows from halfWidthRe scaled
+   by the window's own aspect ratio, so the view is never distorted
+   regardless of how far in gView is zoomed.
+   
+   double, not float: gView.centreRe/centreIm need to keep meaningful
+   precision even once halfWidthRe has shrunk very small from repeated
+   zooming, which float's ~7 significant digits can't hold onto for
+   long. The per-pixel iteration loop (IterateEscapeTime(), in
+   mwWindow.c) still narrows to float right before iterating, for
+   performance - so this extends how far a zoom can go before that
+   narrowing starts to show as visible banding in the finest detail,
+   but doesn't remove the limit entirely. Going further than that
+   would need computing iterations in double (or a perturbation-based
+   approach for arbitrary depth), which is a substantially bigger
+   change than parameterising the viewport. */
+typedef struct {
+	double	centreRe;
+	double	centreIm;
+	double	halfWidthRe;
+} FractalView;
+
+extern FractalView gView;
+
+/* Resets gView to whichever fractal is currently selected (width,
+   extern'd directly elsewhere - see mwMenus.c) own natural default
+   view. Called when a different fractal is chosen from the menu, so
+   switching fractals always starts from that fractal's own view
+   rather than carrying over whatever zoom or pan the previous one was
+   left at. Harmless to call for the Tree, which doesn't use gView at
+   all - it just does nothing observable. */
+void ResetViewForCurrentFractal(void);
+
+/* Converts a pixel position into the point in the complex plane it
+   corresponds to, according to gView. Shared by SampleMandelbrot()/
+   SampleJulia() (mwWindow.c) and the marquee zoom feature (mwZoom.c),
+   both of which need exactly this mapping - the fractal samplers to
+   know what to iterate, the marquee to know which region of the
+   complex plane a dragged selection rectangle corresponds to. */
+void MapPixelToComplexPlane(short x, short y, double *outRe, double *outIm);
+
 /* Read-only access to render state, for the Get Info window (mwInfo.c). */
 Boolean IsRenderActive(void);
 unsigned long RenderElapsedTicks(void);
@@ -59,6 +102,18 @@ CTabHandle GetOffscreenColorTable(void);
    ShouldRenderInColor(), exposed for mwColorCycle.c to decide which
    of colour-cycling or pattern-cycling applies. */
 Boolean IsRenderingInColor(void);
+
+/* True if Animate would actually do something useful right now.
+   Colour cycling only needs the offscreen colour table to exist, so
+   this always follows IsRenderingInColor() there. Mono pattern-cycling
+   additionally needs gMonoShadeLevels to have both allocated
+   successfully (see AllocateOffscreenMonoStore() - it's larger than
+   the mono bitmap itself, so it's the more likely of the two to fail
+   under real memory pressure) and to actually be populated - which,
+   uniquely among the fractals, the Tree never does: it draws branches
+   directly with MoveTo()/Line() rather than through ShadeBlock(), so
+   there's no graduated shading to record or animate at all. */
+Boolean IsAnimationAvailable(void);
 
 /* Blits the whole current offscreen image to the window, exactly as
    an update event would - for mwColorCycle.c to call after rotating

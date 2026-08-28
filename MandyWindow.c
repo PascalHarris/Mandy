@@ -10,6 +10,7 @@
 #include "mwWindow.h"
 #include "mwInfo.h"
 #include "mwColorCycle.h"
+#include "mwZoom.h"
 #include <GestaltEqu.h>
 
 extern	WindowPtr	mwWindow;
@@ -115,7 +116,7 @@ void HandleMouseDown (EventRecord *theEvent) {
                 if (theWindow != FrontWindow())
                     SelectWindow(mwWindow);
                 else
-                    InvalRect(&mwWindow->portRect);
+                    TrackMarqueeAndZoom(theEvent->where);
             } else if (IsInfoWindow(theWindow)) {
                 if (theWindow != FrontWindow())
                     SelectWindow(theWindow);

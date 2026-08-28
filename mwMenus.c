@@ -68,7 +68,18 @@ void SetUpMenus(void) {
    mwWindow.c. A finished OR aborted render leaves them enabled either
    way - Save As because GetOffscreenImage() doesn't distinguish those
    two, and Animate because there's a real, if partial, image to
-   animate regardless of how the render ended. */
+   animate regardless of how the render ended.
+   
+   Animate is also disabled outright when IsAnimationAvailable() says
+   it wouldn't do anything useful even once a render finishes - the
+   Tree fractal (no graduated shading to animate) or, in monochrome, a
+   shade-level buffer that failed to allocate under low memory - rather
+   than leaving the person to conclude animation is silently broken.
+   IsAnimationActive() is included in that condition too, though, so
+   switching to the Tree while animation is already running from a
+   previous fractal never disables the item out from under a running
+   "Stop Animation" - it stays clickable to turn off regardless of
+   whether turning it on right now would be available. */
 static void enable (MenuHandle menu, short item, short ok);
 
 void AdjustMenus(void) {
@@ -86,7 +97,7 @@ void AdjustMenus(void) {
     enable(fileMenu, closeItem, DA || ((WindowPeek) mwWindow)->visible);
     enable(fileMenu, saveAsItem, !IsRenderActive());
     
-    enable(fractalMenu, animateItem, !IsRenderActive());
+    enable(fractalMenu, animateItem, !IsRenderActive() && (IsAnimationAvailable() || IsAnimationActive()));
     
     //	CheckItem(widthMenu, width, true);
 }
@@ -162,6 +173,7 @@ void HandleMenu (long mSelect) {
                  EnsureWindowVisible();
                  CheckItem(fractalMenu, width, false);
                  width = menuItem;
+                 ResetViewForCurrentFractal();
                  RenderFractalOffscreen();
                  InvalRect(&mwWindow->portRect);
              }
