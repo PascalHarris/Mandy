@@ -10,7 +10,16 @@ void SetUpWindow(void);
 void RenderFractalOffscreen(void);
 void AdvanceFractalRender(void);
 void AbortFractalRender(void);
-void HandleWindowResized(void);
+
+/* Updates this file's own size-tracking state (windowWidth/
+   windowHeight, imageStart) to newWidth/newHeight and reallocates the
+   offscreen store at the new size, then starts a fresh render - see
+   mwWindow.c. Does NOT resize mwWindow itself; call SizeWindow() first
+   (see mwZoom.c's TrackWindowResize()). newWidth/newHeight should
+   already be within sensible bounds before calling this - it only
+   guards against an outright degenerate (zero or negative) size, not
+   against anything larger than what's reasonable for the screen. */
+void HandleWindowResized(short newWidth, short newHeight);
 
 /* The visible region of the complex plane Mandelbrot and Julia render
    against - centreRe/centreIm is the middle of the view, halfWidthRe
@@ -54,6 +63,15 @@ void ResetViewForCurrentFractal(void);
    know what to iterate, the marquee to know which region of the
    complex plane a dragged selection rectangle corresponds to. */
 void MapPixelToComplexPlane(short x, short y, double *outRe, double *outIm);
+
+/* Clamps a proposed gView.halfWidthRe to a sensible range for the
+   current fractal: a floor low enough to avoid float-precision
+   collapse in IterateEscapeTime()'s per-pixel iteration (mwWindow.c),
+   and a ceiling matching the current fractal's own default view, so
+   repeated zooming out can't show an ever-larger, meaningless region.
+   Used by both the marquee zoom feature's candidate view and keyboard
+   zoom (+/-) - see mwZoom.c. */
+double ClampHalfWidthRe(double proposedHalfWidthRe);
 
 /* Read-only access to render state, for the Get Info window (mwInfo.c). */
 Boolean IsRenderActive(void);

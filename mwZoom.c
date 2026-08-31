@@ -1,8 +1,12 @@
 /*****
  * mwZoom.c
  *
- *		Marquee selection on the fractal window, and the zoom-to-
- *		selection feature it drives.
+ *		Everything that changes the fractal's visible region or the
+ *		window's own shape: marquee selection and the zoom-to-
+ *		selection feature it drives, resizing the window itself via
+ *		its grow box, and keyboard zoom (+/-). All three end up
+ *		adjusting gView (see mwWindow.h) and/or the window's actual
+ *		size, then calling RenderFractalOffscreen().
  *
  *		REQUIRES a "Zoom Confirmation" DLOG/DITL resource pair at
  *		ID 128 (kZoomConfirmDialogID below) - a resource, not
@@ -50,14 +54,15 @@ extern	WindowPtr	mwWindow;
    popping the confirmation dialog for a one-or-two-pixel jiggle. */
 #define kMinimumMarqueeSize		8
 
-/* The marquee's aspect ratio. Kept as two separate numbers rather
-   than a single named "5x3" constant so a future change to this
-   ratio - already revised once, from an initial 4:3 - is a one-line
-   edit here rather than a rename of ConstrainToAspectRatio() and
-   every call to it. Doesn't need to match the window's own current
-   512x300 shape exactly; see mwZoom.h and the project notes on the
-   still-to-come resizable, aspect-locked window this is expected to
-   eventually line up with. */
+/* The aspect ratio both the marquee and the window's own grow box are
+   locked to (see ConstrainToAspectRatio(), TrackMarqueeAndZoom(), and
+   TrackWindowResize()). Kept as two separate numbers rather than a
+   single named "5x3" constant so a future change to this ratio -
+   already revised once, from an initial 4:3 - is a one-line edit here
+   rather than a rename of ConstrainToAspectRatio() and every call to
+   it. This is also now the window's own actual shape once resized via
+   its grow box (see TrackWindowResize()), rather than an aspiration
+   the fixed-size window didn't yet match. */
 #define kAspectRatioNumerator	5
 #define kAspectRatioDenominator	3
 
@@ -66,6 +71,12 @@ extern	WindowPtr	mwWindow;
 #define kFirstButtonItem		2
 #define kSecondButtonItem		3
 #define kZoomButtonTitle		"\pZoom"
+
+/* TrackWindowResize()'s size bounds - see there for reasoning.
+   100x60 is exactly 5:3, matching kAspectRatioNumerator/Denominator,
+   so the minimum itself is never a degenerate, off-ratio shape. */
+#define kMinimumWindowWidth		100
+#define kMinimumWindowHeight	60
 
 static void    ConstrainToAspectRatio(Rect *r, Point anchor, Point current, short ratioNumerator, short ratioDenominator);
 static void    ClampPointToImageBounds(Point *p);
@@ -131,6 +142,7 @@ void TrackMarqueeAndZoom(Point globalMouseDownPoint) {
 		candidate.halfWidthRe = (dRe2 - dRe1) / 2.0;
 		if (candidate.halfWidthRe < 0.0)
 			candidate.halfWidthRe = -candidate.halfWidthRe;
+		candidate.halfWidthRe = ClampHalfWidthRe(candidate.halfWidthRe);
 		
 		if (ConfirmZoom()) {
 			gView = candidate;
@@ -305,4 +317,147 @@ static Boolean ConfirmZoom(void) {
 	DisposeDialog(dialog);
 	
 	return confirmed;
+}
+
+/* TrackWindowResize()
+   See mwZoom.h. Tracks mwWindow's grow box: rather than calling
+   GrowWindow() directly, which has no notion of a locked aspect
+   ratio, this runs its own tracking loop - structurally the same as
+   TrackMarqueeAndZoom()'s, and reusing the same ConstrainToAspectRatio()
+   helper - XOR-outlining the proposed new window frame as the mouse
+   moves, anchored at mwWindow's own local (0,0) origin (its top-left
+   corner, which never moves during a resize; only the bottom-right,
+   where the grow box lives, does).
+   
+   Draws entirely within mwWindow's own port, in its own local
+   coordinates - not the Window Manager port, which an earlier version
+   of this function switched to (via GetWMgrPort()/GetCWMgrPort()) so
+   the outline could extend past mwWindow's current bounds without
+   being clipped. Real testing crashed immediately on entering this
+   function, right after confirming (via a temporary diagnostic) that
+   FindWindow() correctly recognises the click as inGrow in the first
+   place - narrowing the fault to something inside here, and
+   GetWMgrPort()/GetCWMgrPort() were the one thing in this function
+   with no precedent anywhere else in this project (everything else -
+   SetPort(), FrameRect(), PenMode(), GetMouse() - is already proven
+   working via TrackMarqueeAndZoom()). Given this project's history of
+   exactly this pattern (CTabChanged(), PmForeColor() - see
+   mwColorCycle.c/mwWindow.c), removing the untested call outright
+   seemed a safer fix than chasing down why it crashed.
+   
+   The real cost of dropping the Window Manager port: the outline is
+   now clipped to mwWindow's current bounds like any other drawing
+   into it, so growing the window larger than its current size shows
+   only the portion of the outline that still fits within the old
+   bounds while dragging - a real, visible limitation, but a
+   functioning one. Shrinking the window is unaffected, since the
+   whole proposed frame is always within the current, larger bounds
+   in that direction. The final resize itself (SizeWindow(),
+   HandleWindowResized()) doesn't depend on what was drawn regardless,
+   so this only affects the live preview, not the result.
+   
+   Clamps the proposed size to kMinimumWindowWidth/Height at the small
+   end, and to the largest kAspectRatioNumerator:Denominator rectangle
+   that still fits between the window's current position and the
+   screen's own edges at the large end - both computed once, before
+   the tracking loop starts, since neither the window's position nor
+   the screen's size can change during the drag. */
+void TrackWindowResize(Point globalMouseDownPoint) {
+	GrafPtr	savedPort;
+	Point	origin;
+	Point	currentPoint;
+	Point	screenBottomRightLocal;
+	Rect	proposedFrame, previousFrame, maxFrame;
+	Boolean	haveDrawnAFrame = false;
+	short	maxWidth, maxHeight;
+	
+	GetPort(&savedPort);
+	SetPort(mwWindow);
+	
+	origin.h = 0;
+	origin.v = 0;
+	
+	screenBottomRightLocal.h = screenBits.bounds.right;
+	screenBottomRightLocal.v = screenBits.bounds.bottom;
+	GlobalToLocal(&screenBottomRightLocal);
+	
+	ConstrainToAspectRatio(&maxFrame, origin, screenBottomRightLocal, kAspectRatioNumerator, kAspectRatioDenominator);
+	maxWidth  = maxFrame.right  - maxFrame.left;
+	maxHeight = maxFrame.bottom - maxFrame.top;
+	
+	PenMode(patXor);
+	
+	while (StillDown()) {
+		short width, height;
+		
+		GetMouse(&currentPoint);
+		
+		ConstrainToAspectRatio(&proposedFrame, origin, currentPoint, kAspectRatioNumerator, kAspectRatioDenominator);
+		
+		width  = proposedFrame.right  - proposedFrame.left;
+		height = proposedFrame.bottom - proposedFrame.top;
+		
+		if (width < kMinimumWindowWidth || height < kMinimumWindowHeight) {
+			width  = kMinimumWindowWidth;
+			height = kMinimumWindowHeight;
+		} else if (width > maxWidth || height > maxHeight) {
+			width  = maxWidth;
+			height = maxHeight;
+		}
+		
+		SetRect(&proposedFrame, 0, 0, width, height);
+		
+		if (!haveDrawnAFrame || !EqualRect(&proposedFrame, &previousFrame)) {
+			if (haveDrawnAFrame)
+				FrameRect(&previousFrame);	/* erase the previous frame */
+			
+			FrameRect(&proposedFrame);
+			previousFrame   = proposedFrame;
+			haveDrawnAFrame = true;
+		}
+	}
+	
+	if (haveDrawnAFrame)
+		FrameRect(&previousFrame);	/* erase the final frame */
+	
+	PenMode(patCopy);
+	SetPort(savedPort);
+	
+	if (!haveDrawnAFrame)
+		return;
+	
+	{
+		short newWidth  = previousFrame.right  - previousFrame.left;
+		short newHeight = previousFrame.bottom - previousFrame.top;
+		short currentWidth, currentHeight;
+		
+		GetFractalResolution(&currentWidth, &currentHeight);
+		
+		if (newWidth == currentWidth && newHeight == currentHeight)
+			return;
+		
+		SizeWindow(mwWindow, newWidth, newHeight, true);
+		HandleWindowResized(newWidth, newHeight);
+	}
+}
+
+/* KeyboardZoom()
+   See mwZoom.h. '-' doubles gView.halfWidthRe (zoom out to double the
+   visible area, centre unchanged); '+' halves it (zoom into the
+   centre half of the current view on each axis - the span shrinks,
+   the centre doesn't move). ClampHalfWidthRe() (mwWindow.h) keeps
+   repeated presses from zooming in past the point float precision in
+   the per-pixel iteration can resolve, or out past the current
+   fractal's own natural extent. */
+void KeyboardZoom(Boolean zoomIn) {
+	double proposedHalfWidthRe;
+	
+	if (!IsZoomOutAvailable() || IsRenderActive())
+		return;
+	
+	proposedHalfWidthRe = zoomIn ? (gView.halfWidthRe / 2.0) : (gView.halfWidthRe * 2.0);
+	gView.halfWidthRe    = ClampHalfWidthRe(proposedHalfWidthRe);
+	
+	RenderFractalOffscreen();
+	DrawContent(((WindowPeek) mwWindow)->hilited);
 }

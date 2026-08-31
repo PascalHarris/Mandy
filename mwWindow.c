@@ -16,9 +16,22 @@ extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
 
 #define windowX 0
 #define windowY 40
-#define windowWidth 512
-#define windowHeight 300
 #define pi 3.14159265
+
+/* windowWidth/windowHeight - the content area's current size. These
+   were #define constants (512x300) before the window became
+   resizable (see HandleWindowResized()) - now runtime variables,
+   updated there and read everywhere else in this file exactly as
+   before, so a resize is visible everywhere that already reads them
+   by name (fractal coordinate mapping, buffer sizing via imageStart,
+   GetFractalResolution(), and so on) without those call sites needing
+   to change at all. windowX/windowY stay fixed constants - they're
+   only the window's initial on-screen position at launch, not
+   involved in resizing (the window's actual position afterward,
+   including after being dragged, is tracked by the Toolbox itself,
+   not by this project). */
+static short windowWidth  = 512;
+static short windowHeight = 300;
 
 /* Progressive-render tuning -------------------------------------------
    kBlockGridTargetColumns: the coarsest pass aims for about this many
@@ -105,8 +118,15 @@ extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
 
 WindowPtr	mwWindow;
 Rect		dragRect;
-Rect		windowBounds = { windowY, windowX, windowY+windowHeight, windowX+windowWidth };
-Rect		imageStart = {0, 0, windowHeight, windowWidth};
+/* windowBounds/imageStart's initial values are written out literally
+   (matching windowWidth/windowHeight's own initial values above)
+   rather than computed from those variables, since C requires a
+   static initializer to be a compile-time constant - a plain variable
+   reference, even one that never actually changes before this line
+   runs, isn't allowed here. HandleWindowResized() updates both
+   directly, by assignment, on every actual resize. */
+Rect		windowBounds = { windowY, windowX, windowY+300, windowX+512 };
+Rect		imageStart = {0, 0, 300, 512};
 int			width = 5; 
 
 /* The current Mandelbrot/Julia view - see FractalView in mwWindow.h.
@@ -141,6 +161,49 @@ void MapPixelToComplexPlane(short x, short y, double *outRe, double *outIm) {
 	
 	*outRe = gView.centreRe + ((double) (x - windowWidth  / 2) / (windowWidth  / 2.0)) * gView.halfWidthRe;
 	*outIm = gView.centreIm + ((double) (y - windowHeight / 2) / (windowHeight / 2.0)) * halfHeightIm;
+}
+
+/* kMinimumHalfWidthRe: below this, adjacent pixels' cRe/cIm values -
+   computed in double (MapPixelToComplexPlane()) but narrowed to float
+   right before IterateEscapeTime() iterates, for performance - would
+   round to the same float. Typical Mandelbrot/Julia coordinates of
+   interest are order-1 in magnitude, and float holds roughly 7
+   significant decimal digits there; at this project's ~512-pixel
+   width, this floor keeps the per-pixel step comfortably above that
+   precision limit, though "comfortably" is a safety margin chosen for
+   headroom, not an exact derivation of the exact point detail
+   disappears. Going deeper than this would need computing iterations
+   in double, or a perturbation-based approach, to actually resolve
+   further detail - see the comment on FractalView in mwWindow.h. */
+#define kMinimumHalfWidthRe	0.0001
+
+/* MaximumHalfWidthReForCurrentFractal()
+   The current fractal's own default halfWidthRe - the ceiling
+   ClampHalfWidthRe() enforces, so zooming out repeatedly can't show an
+   ever-larger, eventually meaningless region beyond what the fractal
+   was ever meant to be viewed at. Falls back to Mandelbrot's own
+   default for any other width - shouldn't be reached in practice,
+   since callers check IsZoomOutAvailable() first, but returning a
+   sensible, real value here instead of leaving this undefined for a
+   caller that doesn't check first, does no harm. */
+static double MaximumHalfWidthReForCurrentFractal(void) {
+	if (width == 3)
+		return kJuliaDefaultHalfWidthRe;
+	
+	return kMandelbrotDefaultHalfWidthRe;
+}
+
+/* ClampHalfWidthRe()
+   See mwWindow.h. */
+double ClampHalfWidthRe(double proposedHalfWidthRe) {
+	double maximum = MaximumHalfWidthReForCurrentFractal();
+	
+	if (proposedHalfWidthRe < kMinimumHalfWidthRe)
+		return kMinimumHalfWidthRe;
+	if (proposedHalfWidthRe > maximum)
+		return maximum;
+	
+	return proposedHalfWidthRe;
 }
 
 /* Offscreen pixel store --------------------------------------------
@@ -378,9 +441,9 @@ void SetUpWindow(void) {
     dragRect = screenBits.bounds;
     
     if (gHasColorQD)
-        mwWindow = NewCWindow(0L, &windowBounds, kIdleWindowTitle, true, noGrowDocProc, (WindowPtr) -1L, true, 0);
+        mwWindow = NewCWindow(0L, &windowBounds, kIdleWindowTitle, true, documentProc, (WindowPtr) -1L, true, 0);
     else
-        mwWindow = NewWindow(0L, &windowBounds, kIdleWindowTitle, true, noGrowDocProc, (WindowPtr) -1L, true, 0);
+        mwWindow = NewWindow(0L, &windowBounds, kIdleWindowTitle, true, documentProc, (WindowPtr) -1L, true, 0);
     
     SetPort(mwWindow);
     
@@ -1611,8 +1674,8 @@ static void BlitOffscreenToWindow(const Rect *changedRect) {
    time, so the image comes into focus instead of the app looking
    hung. Call this only when the fractal's parameters actually change:
    the fractal type (HandleMenu()'s fractalID case), a window resize
-   (HandleWindowResized()), or a future zoom - never from an ordinary
-   update event.
+   (HandleWindowResized()), or a zoom (mwZoom.c) - never from an
+   ordinary update event.
    
    If the offscreen store isn't available and can't be allocated (low
    memory), this does nothing; DrawContent() then falls back to
@@ -1695,17 +1758,37 @@ void AbortFractalRender(void) {
 }
 
 /* HandleWindowResized()
-   Frees and reallocates the offscreen store at the window's new size,
-   then starts rendering into it again from the coarsest pass - the
-   same progressive mechanism used for the first draw, rather than a
-   separate resize-specific redraw routine. Nothing calls this yet -
-   the window has no grow box today - but it's ready for the
-   resizing/zoom work (#5) to call once imageStart reflects the new
-   size. (Restarting from scratch at the new size, rather than
-   stretching what was already on screen, is the simple version of
-   this; reusing the previous frame as a first guess is a possible
-   later refinement.) */
-void HandleWindowResized(void) {
+   Updates windowWidth/windowHeight and imageStart to the given new
+   size, then frees and reallocates the offscreen store (and the
+   default-view cache and mono shade-level buffer alongside it - see
+   DisposeOffscreenStore()) and starts rendering into it again from
+   the coarsest pass - the same progressive mechanism used for the
+   first draw, rather than a separate resize-specific redraw routine.
+   This is a genuine recompute, not something the default-view cache
+   (RestoreDefaultViewFromCache()) can serve: that cache is sized for
+   the old dimensions, and the old offscreen content doesn't cover the
+   newly exposed area at a different size regardless. (Restarting from
+   scratch at the new size, rather than stretching what was already on
+   screen, is the simple version of this; reusing the previous frame
+   as a first guess is a possible later refinement.)
+   
+   Called from mwZoom.c's TrackWindowResize() after SizeWindow() has
+   already resized mwWindow itself - this only updates this file's own
+   size-tracking state and the offscreen store, it doesn't touch the
+   window. newWidth/newHeight are trusted to already be within sensible
+   bounds (TrackWindowResize() clamps against its own minimum/maximum
+   before ever calling this) - the check here is just a last-resort
+   guard against a degenerate (zero or negative) size reaching the
+   fractal functions' sizex/sizey loops, from any future caller that
+   might not clamp as carefully. */
+void HandleWindowResized(short newWidth, short newHeight) {
+    if (newWidth < 1 || newHeight < 1)
+        return;
+    
+    windowWidth  = newWidth;
+    windowHeight = newHeight;
+    SetRect(&imageStart, 0, 0, newWidth, newHeight);
+    
     DisposeOffscreenStore();
     RenderFractalOffscreen();
 }
@@ -1721,7 +1804,21 @@ void HandleWindowResized(void) {
    
    If there's no offscreen store (allocation failed under low memory),
    this falls back to computing the fractal directly into the window,
-   in one blocking pass, on every update. */
+   in one blocking pass, on every update.
+   
+   Also redraws the grow icon, via DrawGrowIcon() - the Toolbox
+   recognises clicks in that corner as inGrow (FindWindow()) purely
+   because the window's procID is documentProc, but it never paints
+   the icon itself; that's always the application's own job, and
+   without it the grow box is fully functional but invisible. Doing
+   this here, rather than only from the updateEvt case in
+   MandyWindow.c, covers every path that paints content - a marquee
+   zoom or a resize (mwZoom.c) blits fresh content over the exact
+   corner the icon lives in just as much as an ordinary update does,
+   so it needs redrawing just as often. DrawGrowIcon() reads the
+   window's own hilited state to decide how to draw it (solid when
+   active, outline when not), so this doesn't need to check active
+   itself before calling it. */
 void DrawContent(short active) {
     EnterWindowPort();
     
@@ -1729,4 +1826,6 @@ void DrawContent(short active) {
         BlitOffscreenToWindow(NULL);
     else
         DrawFractalDirectly();
+    
+    DrawGrowIcon(mwWindow);
 }

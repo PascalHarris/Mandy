@@ -133,6 +133,11 @@ void HandleMouseDown (EventRecord *theEvent) {
                 TrackGoAway(theWindow, theEvent->where))
                 CloseInfoWindow();
             break;
+            
+        case inGrow:
+            if (theWindow == mwWindow)
+                TrackWindowResize(theEvent->where);
+            break;
     }
 }
 
@@ -168,6 +173,10 @@ void HandleEvent(void) {
                         AnimationArrowKeyPressed(true);
                     else if (keyCode == kDownArrowKeyCode || keyCode == kLeftArrowKeyCode)
                         AnimationArrowKeyPressed(false);
+                    else if (keyCode == '+')
+                        KeyboardZoom(true);
+                    else if (keyCode == '-')
+                        KeyboardZoom(false);
                 }
                 break;
                 
