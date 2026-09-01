@@ -62,6 +62,7 @@
  *****/
 #include "mwZoom.h"
 #include "mwWindow.h"
+#include <QDOffscreen.h>
 #ifndef _Quickdraw_
 #include <Quickdraw.h>
 #endif
@@ -73,6 +74,7 @@
 #endif
 
 extern	WindowPtr	mwWindow;
+extern	Boolean		gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
 
 /* Below this, in either dimension, a marquee is treated as an
    accidental click-drag rather than a deliberate selection - avoids
@@ -301,12 +303,82 @@ static Boolean DialogItemTitleIs(DialogPtr dialog, short itemNumber, const unsig
    edge that a naive centring would push the dialog partially off it. */
 #define kScreenEdgeMargin	4
 
+/* GetScreenBoundsForWindow()
+   Finds the bounds, in global coordinates, of whichever screen
+   mwWindow is actually on - not always the main screen, on a
+   multiple-monitor system.
+   
+   Falls back to screenBits.bounds (the only screen that could
+   possibly exist) when gHasColorQD is false: multiple screens require
+   Color QuickDraw's Device Manager extensions in the first place,
+   true of every real Mac Plus, this project's stated minimum target.
+   Also falls back there if GetMaxDevice() can't find a screen the
+   window intersects at all (NULL) - an edge case that shouldn't come
+   up in practice, but cheap insurance against ever centring on a
+   garbage rect.
+   
+   GetMaxDevice() is documented as finding the device with the
+   greatest pixel depth among those intersecting a given rect, not
+   specifically "the one most of a window is on" - but it's the long-
+   established idiom for exactly this question regardless (see, for
+   instance, MacTech's "Multiple Monitors vs. Your Application"),
+   since in practice a window only spans more than one screen right at
+   the boundary between them, where any reasonable choice of "which
+   screen" is equally fine. Real C usage of this call, in that same
+   published example, takes globalRect by pointer despite Inside
+   Macintosh's Pascal signature showing it by value - matched here. */
+static void GetScreenBoundsForWindow(Rect *outBounds) {
+	GrafPtr		savedPort;
+	Rect		windowGlobalRect;
+	GDHandle	device;
+	
+	if (!gHasColorQD) {
+		*outBounds = screenBits.bounds;
+		return;
+	}
+	
+	GetPort(&savedPort);
+	SetPort(mwWindow);
+	windowGlobalRect = ((GrafPtr) mwWindow)->portRect;
+	LocalToGlobal((Point *) &windowGlobalRect);
+	LocalToGlobal(1 + (Point *) &windowGlobalRect);
+	SetPort(savedPort);
+	
+	device = GetMaxDevice(&windowGlobalRect);
+	
+	*outBounds = device ? (**device).gdRect : screenBits.bounds;
+}
+
+/* CenterDialogOverMainWindow()
+   Repositions dialog so its centre lands on mwWindow's own centre, in
+   global coordinates - called before the dialog is ever shown, so
+   there's no visible jump from wherever its DLOG resource happened to
+   place it. ResEdit has no way to express "centred over a particular
+   window" in a resource - a DLOG's bounds are a fixed, absolute
+   screen position - so this has to happen in code, especially given
+   mwWindow itself can be dragged and resized (via its grow box - see
+   TrackWindowResize()), so any position baked into the resource would
+   only be centred by coincidence, and only until the window moved.
+   
+   Falls back to centring on the whole screen mwWindow is on (see
+   GetScreenBoundsForWindow() - not necessarily the main screen, on a
+   multiple-monitor system) whenever centring on the window itself
+   wouldn't work cleanly: either the dialog is larger than the window,
+   so it wouldn't actually fit inside it, or the window is close
+   enough to a screen edge that window-centring would push the dialog
+   partially off screen. Falling back to a full re-centre, rather than
+   nudging the window-centred position back onto the screen, avoids
+   the dialog ending up pinned against one edge - centred on
+   something, rather than arbitrarily placed. */
 static void CenterDialogOverMainWindow(DialogPtr dialog) {
 	GrafPtr	savedPort;
 	Point	windowTopLeft;
 	short	windowWidth, windowHeight;
 	short	dialogWidth, dialogHeight;
 	short	newLeft, newTop;
+	Rect	screenBounds;
+	Boolean	fitsInsideWindow;
+	Boolean	fitsOnScreen;
 	
 	GetPort(&savedPort);
 	SetPort(mwWindow);
@@ -320,17 +392,22 @@ static void CenterDialogOverMainWindow(DialogPtr dialog) {
 	dialogWidth  = ((GrafPtr) dialog)->portRect.right  - ((GrafPtr) dialog)->portRect.left;
 	dialogHeight = ((GrafPtr) dialog)->portRect.bottom - ((GrafPtr) dialog)->portRect.top;
 	
+	GetScreenBoundsForWindow(&screenBounds);
+	
+	fitsInsideWindow = (dialogWidth <= windowWidth) && (dialogHeight <= windowHeight);
+	
 	newLeft = windowTopLeft.h + (windowWidth  - dialogWidth)  / 2;
 	newTop  = windowTopLeft.v + (windowHeight - dialogHeight) / 2;
 	
-	if (newLeft < kScreenEdgeMargin)
-		newLeft = kScreenEdgeMargin;
-	if (newTop < kScreenEdgeMargin)
-		newTop = kScreenEdgeMargin;
-	if (newLeft + dialogWidth > screenBits.bounds.right - kScreenEdgeMargin)
-		newLeft = screenBits.bounds.right - kScreenEdgeMargin - dialogWidth;
-	if (newTop + dialogHeight > screenBits.bounds.bottom - kScreenEdgeMargin)
-		newTop = screenBits.bounds.bottom - kScreenEdgeMargin - dialogHeight;
+	fitsOnScreen = (newLeft >= screenBounds.left + kScreenEdgeMargin)
+			&& (newTop  >= screenBounds.top  + kScreenEdgeMargin)
+			&& (newLeft + dialogWidth  <= screenBounds.right  - kScreenEdgeMargin)
+			&& (newTop  + dialogHeight <= screenBounds.bottom - kScreenEdgeMargin);
+	
+	if (!fitsInsideWindow || !fitsOnScreen) {
+		newLeft = screenBounds.left + ((screenBounds.right  - screenBounds.left) - dialogWidth)  / 2;
+		newTop  = screenBounds.top  + ((screenBounds.bottom - screenBounds.top)  - dialogHeight) / 2;
+	}
 	
 	MoveWindow(dialog, newLeft, newTop, false);
 }
