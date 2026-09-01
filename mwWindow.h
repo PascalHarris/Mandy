@@ -80,6 +80,13 @@ ConstStr255Param CurrentFractalName(void);
 short CurrentScreenDepth(void);
 void GetFractalResolution(short *outWidth, short *outHeight);
 
+/* A deliberate overestimate of how many bytes the offscreen store
+   (and, for mono, the shade-level buffer alongside it) would need at
+   a given size - used to decide whether a proposed window size is
+   likely to fail to allocate before ever attempting it (see mwZoom.c's
+   TrackWindowResize()), not an exact figure. */
+long EstimateOffscreenBytesNeeded(short width, short height);
+
 /* The mathematical constants behind whichever fractal is currently
    selected (width, extern'd directly elsewhere in this project - see
    mwMenus.c/mwInfo.c - decides which fields are meaningful):

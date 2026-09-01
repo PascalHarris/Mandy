@@ -1253,6 +1253,26 @@ void GetFractalResolution(short *outWidth, short *outHeight) {
 	*outHeight = windowHeight;
 }
 
+/* EstimateOffscreenBytesNeeded()
+   See mwWindow.h. A deliberate overestimate - rounds generously and
+   adds a fixed margin for the GWorld's/BitMap's own small internal
+   structures - rather than an exact figure matching
+   AllocateOffscreenColorStore()/AllocateOffscreenMonoStore()'s own
+   real sizing. Good enough to decide whether an allocation is likely
+   to fail before ever attempting it (see mwZoom.c's TrackWindowResize()),
+   not a substitute for those functions' own exact calculations. */
+long EstimateOffscreenBytesNeeded(short width, short height) {
+	if (gHasColorQD) {
+		return (long) width * height + 2048L;
+	} else {
+		short	finestSize      = CurrentFinestBlockSize();
+		long	bitmapBytes     = ((long) (width + 15) / 16) * 2 * height;
+		long	shadeLevelBytes = ((long) width / finestSize) * ((long) height / finestSize);
+		
+		return bitmapBytes + shadeLevelBytes + 1024L;
+	}
+}
+
 /* GetFractalParameters()
    See the FractalParameters comment in mwWindow.h for which fields
    apply to which fractal.
@@ -1806,19 +1826,11 @@ void HandleWindowResized(short newWidth, short newHeight) {
    this falls back to computing the fractal directly into the window,
    in one blocking pass, on every update.
    
-   Also redraws the grow icon, via DrawGrowIcon() - the Toolbox
-   recognises clicks in that corner as inGrow (FindWindow()) purely
-   because the window's procID is documentProc, but it never paints
-   the icon itself; that's always the application's own job, and
-   without it the grow box is fully functional but invisible. Doing
-   this here, rather than only from the updateEvt case in
-   MandyWindow.c, covers every path that paints content - a marquee
-   zoom or a resize (mwZoom.c) blits fresh content over the exact
-   corner the icon lives in just as much as an ordinary update does,
-   so it needs redrawing just as often. DrawGrowIcon() reads the
-   window's own hilited state to decide how to draw it (solid when
-   active, outline when not), so this doesn't need to check active
-   itself before calling it. */
+   Deliberately doesn't call DrawGrowIcon(): the grow box (documentProc,
+   see SetUpWindow()) is fully functional - FindWindow() recognises
+   clicks in that corner as inGrow regardless of whether anything is
+   drawn there - but left visually blank on purpose, rather than
+   showing the standard hash-mark icon. */
 void DrawContent(short active) {
     EnterWindowPort();
     
@@ -1826,6 +1838,4 @@ void DrawContent(short active) {
         BlitOffscreenToWindow(NULL);
     else
         DrawFractalDirectly();
-    
-    DrawGrowIcon(mwWindow);
 }

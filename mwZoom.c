@@ -8,34 +8,56 @@
  *		adjusting gView (see mwWindow.h) and/or the window's actual
  *		size, then calling RenderFractalOffscreen().
  *
- *		REQUIRES a "Zoom Confirmation" DLOG/DITL resource pair at
- *		ID 128 (kZoomConfirmDialogID below) - a resource, not
- *		something this file can create. As actually built:
+ *		REQUIRES two DLOG/DITL resource pairs - resources, not
+ *		something this file can create:
  *
- *		  DITL 128, three items in this order:
- *		    1. StaticText, "Zoom to the selected area?"
- *		    2. Button,     "Zoom"
- *		    3. Button,     "Cancel"
+ *		  "Zoom Confirmation", ID 128 (kZoomConfirmDialogID). As
+ *		  actually built:
  *
- *		  (This is a different order than originally specified -
- *		  Zoom/Cancel/text - which put the two buttons first; building
- *		  the text label first, as ResEdit naturally encourages, is
- *		  just as fine, since ConfirmZoom() finds "Zoom" by its actual
- *		  title text and item number 1's own text is never inspected -
- *		  only its position matters, as the one item not itself a
- *		  button. If this DITL is ever rebuilt with a different number
- *		  of items, or the text moved to a different slot, kTextItem/
- *		  kFirstButtonItem/kSecondButtonItem below need to move with
- *		  it.)
+ *		    DITL 128, three items in this order:
+ *		      1. StaticText, "Zoom to the selected area?"
+ *		      2. Button,     "Zoom"
+ *		      3. Button,     "Cancel"
  *
- *		  DLOG 128, referencing DITL 128, procID dBoxProc (a plain box
- *		  with no title bar - not a document window, and not one of
- *		  ResEdit's numbered/custom WDEF slots), goAway off (it's
- *		  dismissed by its own buttons, not a close box). The DLOG's
- *		  own "initially visible" flag doesn't matter either way -
- *		  ConfirmZoom() calls ShowWindow() itself rather than relying
- *		  on it, after real testing found that flag unchecked and the
- *		  dialog consequently never appearing at all.
+ *		    (This is a different order than originally specified -
+ *		    Zoom/Cancel/text - which put the two buttons first;
+ *		    building the text label first, as ResEdit naturally
+ *		    encourages, is just as fine, since ConfirmZoom() finds
+ *		    "Zoom" by its actual title text, not by item number.)
+ *
+ *		  "Insufficient Memory", ID 129 (kInsufficientMemoryDialogID),
+ *		  shown by TrackWindowResize() when the requested size looks
+ *		  too large to allocate. Same shape:
+ *
+ *		    DITL 129, three items, order doesn't matter (see below):
+ *		      A StaticText, something like "There isn't enough memory
+ *		        for that size. Use the largest size that fits instead?"
+ *		      A Button, "OK"
+ *		      A Button, "Cancel"
+ *
+ *		  Item order genuinely doesn't matter for either dialog, for
+ *		  either DITL: ConfirmZoom()/ConfirmUseLargestSize() both find
+ *		  their affirmative button by its actual title text
+ *		  (DialogItemTitleIs()), not by which item number it happens
+ *		  to be - real testing already caught this assumption failing
+ *		  once (the Zoom Confirmation DITL's buttons ended up numbered
+ *		  the other way around from what was first assumed), so
+ *		  neither dialog depends on getting it "right" a particular
+ *		  way. What does matter: exactly one item's title must read
+ *		  "Zoom" (for DITL 128) or "OK" (for DITL 129) - kZoomButtonTitle/
+ *		  kOKButtonTitle below - and there must be exactly two buttons
+ *		  total in each, since the tracking loop that waits for a click
+ *		  needs to know how many item numbers to watch for.
+ *
+ *		  Both DLOGs: referencing their own DITL, procID dBoxProc (a
+ *		  plain box with no title bar - not a document window, and not
+ *		  one of ResEdit's numbered/custom WDEF slots), goAway off
+ *		  (dismissed by their own buttons, not a close box). The DLOG's
+ *		  own "initially visible" flag doesn't matter either way - both
+ *		  confirmation functions call ShowWindow() themselves rather
+ *		  than relying on it, after real testing found that flag
+ *		  unchecked on the first dialog and it consequently never
+ *		  appearing at all.
  *
  *****/
 #include "mwZoom.h"
@@ -45,6 +67,9 @@
 #endif
 #ifndef _Dialogs_
 #include <Dialogs.h>
+#endif
+#ifndef _Memory_
+#include <Memory.h>
 #endif
 
 extern	WindowPtr	mwWindow;
@@ -72,6 +97,14 @@ extern	WindowPtr	mwWindow;
 #define kSecondButtonItem		3
 #define kZoomButtonTitle		"\pZoom"
 
+/* "Insufficient Memory" dialog - see the resource requirement
+   documented above TrackWindowResize(). Same item layout as the Zoom
+   Confirmation dialog (text, then two buttons), so kTextItem/
+   kFirstButtonItem/kSecondButtonItem above apply to this one too -
+   it's just a different DLOG/DITL resource ID. */
+#define kInsufficientMemoryDialogID	129
+#define kOKButtonTitle				"\pOK"
+
 /* TrackWindowResize()'s size bounds - see there for reasoning.
    100x60 is exactly 5:3, matching kAspectRatioNumerator/Denominator,
    so the minimum itself is never a degenerate, off-ratio shape. */
@@ -83,6 +116,8 @@ static void    ClampPointToImageBounds(Point *p);
 static Boolean PascalStringsEqual(const unsigned char *a, const unsigned char *b);
 static Boolean DialogItemTitleIs(DialogPtr dialog, short itemNumber, const unsigned char *expectedTitle);
 static Boolean ConfirmZoom(void);
+static Boolean ConfirmUseLargestSize(void);
+static void    FindLargestSizeFittingMemory(short maxWidth, short maxHeight, long availableBytes, short *outWidth, short *outHeight);
 
 /* TrackMarqueeAndZoom()
    See mwZoom.h. */
@@ -250,73 +285,187 @@ static Boolean DialogItemTitleIs(DialogPtr dialog, short itemNumber, const unsig
 	return PascalStringsEqual(itemTitle, expectedTitle);
 }
 
-/* ConfirmZoom()
-   Shows the "Zoom Confirmation" dialog (see the resource requirement
-   documented at the top of this file) and blocks until one of its two
-   buttons is chosen.
+/* CenterDialogOverMainWindow()
+   Repositions dialog so its centre lands on mwWindow's own centre, in
+   global coordinates - called before the dialog is ever shown, so
+   there's no visible jump from wherever its DLOG resource happened to
+   place it. ResEdit has no way to express "centred over a particular
+   window" in a resource - a DLOG's bounds are a fixed, absolute
+   screen position - so this has to happen in code, especially given
+   mwWindow itself can be dragged and resized (via its grow box - see
+   TrackWindowResize()), so any position baked into the resource would
+   only be centred by coincidence, and only until the window moved.
+   
+   Clamps the result to stay fully on screen, with a small margin in
+   from each edge, in case mwWindow is positioned close enough to an
+   edge that a naive centring would push the dialog partially off it. */
+#define kScreenEdgeMargin	4
+
+static void CenterDialogOverMainWindow(DialogPtr dialog) {
+	GrafPtr	savedPort;
+	Point	windowTopLeft;
+	short	windowWidth, windowHeight;
+	short	dialogWidth, dialogHeight;
+	short	newLeft, newTop;
+	
+	GetPort(&savedPort);
+	SetPort(mwWindow);
+	windowTopLeft.h = 0;
+	windowTopLeft.v = 0;
+	LocalToGlobal(&windowTopLeft);
+	SetPort(savedPort);
+	
+	GetFractalResolution(&windowWidth, &windowHeight);
+	
+	dialogWidth  = ((GrafPtr) dialog)->portRect.right  - ((GrafPtr) dialog)->portRect.left;
+	dialogHeight = ((GrafPtr) dialog)->portRect.bottom - ((GrafPtr) dialog)->portRect.top;
+	
+	newLeft = windowTopLeft.h + (windowWidth  - dialogWidth)  / 2;
+	newTop  = windowTopLeft.v + (windowHeight - dialogHeight) / 2;
+	
+	if (newLeft < kScreenEdgeMargin)
+		newLeft = kScreenEdgeMargin;
+	if (newTop < kScreenEdgeMargin)
+		newTop = kScreenEdgeMargin;
+	if (newLeft + dialogWidth > screenBits.bounds.right - kScreenEdgeMargin)
+		newLeft = screenBits.bounds.right - kScreenEdgeMargin - dialogWidth;
+	if (newTop + dialogHeight > screenBits.bounds.bottom - kScreenEdgeMargin)
+		newTop = screenBits.bounds.bottom - kScreenEdgeMargin - dialogHeight;
+	
+	MoveWindow(dialog, newLeft, newTop, false);
+}
+
+/* ShowConfirmationDialog()
+   Shows the DLOG/DITL resource at dialogID and blocks until one of
+   its two buttons is chosen, returning true if the clicked button's
+   own title matches affirmativeTitle exactly. Shared by ConfirmZoom()
+   and ConfirmUseLargestSize() - both dialogs have the same shape (one
+   line of text, then exactly two buttons), just at different resource
+   IDs with different affirmative button text - see the resource
+   requirement documented at the top of this file.
    
    Checks for the DLOG resource explicitly, via GetResource()/ResError(),
    before ever calling GetNewDialog() - rather than relying solely on
    GetNewDialog() itself to fail gracefully when the resource is
-   missing. This is the very first Dialog Manager code in this project,
-   and the resource it depends on is brand new, so a missing or
-   malformed DLOG/DITL is the leading suspect for any failure here;
-   SysBeep() makes that failure audible immediately rather than
-   invisible.
+   missing. Also centres the dialog over mwWindow (CenterDialogOverMainWindow())
+   and forces it on screen via ShowWindow()/SelectWindow() regardless
+   of the resource's own "initially visible" flag. The last two came
+   from real testing: mwWindow can be dragged and resized, so a fixed
+   position baked into the DLOG resource would only be centred by
+   coincidence and only until the window moved - ResEdit has no way to
+   express "centred over a particular window" in a resource, so this
+   has to happen in code; and the visibility flag was found unchecked
+   on the first dialog built, leaving GetNewDialog() creating the
+   window but never showing it. SysBeep() makes a missing/malformed
+   resource audible immediately rather than invisible - the leading
+   suspect for any failure here, being the very first time this
+   project used the Dialog Manager at all; it and a NULL GetNewDialog()
+   both return false, declining whatever the dialog was confirming,
+   rather than crashing or guessing.
    
-   Determines which item number is "Zoom" once, via DialogItemTitleIs(),
-   right after the dialog is created and before either button has been
-   clicked - rather than reading the clicked item's own title back out
-   after ModalDialog() returns, which an earlier version of this
-   function did. That version fixed a click on "Zoom" not registering
-   (the DITL's two buttons had ended up numbered the other way around
-   from a fixed assumption of which was which), but real testing then
-   found "Cancel" stopped working - consistent with something about
-   reading a control's title back out right after tracking a click on
-   it, specifically, not behaving the same way for both buttons.
-   Reading both titles once, before any interaction, removes that
-   timing question entirely: itemHit only ever needs comparing against
-   a plain item number from that point on. */
-static Boolean ConfirmZoom(void) {
+   Determines which item number is affirmativeTitle once, via
+   DialogItemTitleIs(), right after the dialog is created and before
+   either button has been clicked - rather than reading the clicked
+   item's own title back out after ModalDialog() returns, which an
+   earlier version of ConfirmZoom() did. That version fixed a click on
+   "Zoom" not registering (the DITL's two buttons had ended up
+   numbered the other way around from a fixed assumption of which was
+   which), but real testing then found "Cancel" stopped working -
+   consistent with something about reading a control's title back out
+   right after tracking a click on it, specifically, not behaving the
+   same way for both buttons. Reading both titles once, before any
+   interaction, removes that timing question entirely: itemHit only
+   ever needs comparing against a plain item number from that point
+   on. */
+static Boolean ShowConfirmationDialog(short dialogID, const unsigned char *affirmativeTitle) {
 	DialogPtr	dialog;
 	short		itemHit;
-	short		zoomItemNumber;
+	short		affirmativeItemNumber;
 	Boolean		confirmed;
 	Handle		dlogResource;
 	
-	dlogResource = GetResource('DLOG', kZoomConfirmDialogID);
+	dlogResource = GetResource('DLOG', dialogID);
 	if (dlogResource == NULL || ResError() != noErr) {
 		SysBeep(10);
 		return false;
 	}
 	
-	dialog = GetNewDialog(kZoomConfirmDialogID, NULL, (WindowPtr) -1L);
+	dialog = GetNewDialog(dialogID, NULL, (WindowPtr) -1L);
 	if (dialog == NULL) {
 		SysBeep(10);
 		return false;
 	}
 	
-	/* Forces the dialog on screen regardless of the DLOG resource's
-	   own "initially visible" flag - real testing found that flag
-	   unchecked, which left GetNewDialog() creating the window but
-	   never showing it, so ModalDialog() sat waiting for a click on
-	   buttons nobody could see or reach. Not relying on getting that
-	   checkbox right in the resource going forward. */
+	CenterDialogOverMainWindow(dialog);
+	
 	ShowWindow(dialog);
 	SelectWindow(dialog);
 	
-	zoomItemNumber = DialogItemTitleIs(dialog, kFirstButtonItem, (const unsigned char *) kZoomButtonTitle)
+	affirmativeItemNumber = DialogItemTitleIs(dialog, kFirstButtonItem, affirmativeTitle)
 			? kFirstButtonItem : kSecondButtonItem;
 	
 	do {
 		ModalDialog(NULL, &itemHit);
 	} while (itemHit != kFirstButtonItem && itemHit != kSecondButtonItem);
 	
-	confirmed = (itemHit == zoomItemNumber);
+	confirmed = (itemHit == affirmativeItemNumber);
 	
 	DisposeDialog(dialog);
 	
 	return confirmed;
+}
+
+/* ConfirmZoom()
+   See mwZoom.h's resource requirement (Zoom Confirmation, ID 128). */
+static Boolean ConfirmZoom(void) {
+	return ShowConfirmationDialog(kZoomConfirmDialogID, (const unsigned char *) kZoomButtonTitle);
+}
+
+/* ConfirmUseLargestSize()
+   Shown by TrackWindowResize() when the requested size looks too
+   large to allocate (see the resource requirement documented at the
+   top of this file - Insufficient Memory, ID 129). True if the person
+   chooses to proceed with the largest size that does fit instead of
+   cancelling the resize outright. */
+static Boolean ConfirmUseLargestSize(void) {
+	return ShowConfirmationDialog(kInsufficientMemoryDialogID, (const unsigned char *) kOKButtonTitle);
+}
+
+/* FindLargestSizeFittingMemory()
+   Shrinks maxWidth/maxHeight by 10% at a time - simple and safe from
+   rounding surprises, rather than solving the (roughly quadratic)
+   width-to-memory relationship directly - until
+   EstimateOffscreenBytesNeeded() (mwWindow.h) says the result fits
+   within availableBytes, or until hitting kMinimumWindowWidth/Height.
+   Re-snaps the result to an exact kAspectRatioNumerator:Denominator
+   ratio at the end via ConstrainToAspectRatio(), clearing out
+   whatever small drift the repeated 9/10 shrinking's integer rounding
+   may have introduced. */
+static void FindLargestSizeFittingMemory(short maxWidth, short maxHeight, long availableBytes, short *outWidth, short *outHeight) {
+	short	width  = maxWidth;
+	short	height = maxHeight;
+	Point	zero, corner;
+	Rect	snapped;
+	
+	while (width > kMinimumWindowWidth &&
+			EstimateOffscreenBytesNeeded(width, height) > availableBytes) {
+		width  = (short) (((long) width  * 9) / 10);
+		height = (short) (((long) height * 9) / 10);
+	}
+	
+	if (width < kMinimumWindowWidth) {
+		width  = kMinimumWindowWidth;
+		height = kMinimumWindowHeight;
+	}
+	
+	zero.h = 0;
+	zero.v = 0;
+	corner.h = width;
+	corner.v = height;
+	ConstrainToAspectRatio(&snapped, zero, corner, kAspectRatioNumerator, kAspectRatioDenominator);
+	
+	*outWidth  = snapped.right  - snapped.left;
+	*outHeight = snapped.bottom - snapped.top;
 }
 
 /* TrackWindowResize()
@@ -430,11 +579,38 @@ void TrackWindowResize(Point globalMouseDownPoint) {
 		short newWidth  = previousFrame.right  - previousFrame.left;
 		short newHeight = previousFrame.bottom - previousFrame.top;
 		short currentWidth, currentHeight;
+		long  neededBytes, grow, availableBytes;
 		
 		GetFractalResolution(&currentWidth, &currentHeight);
 		
 		if (newWidth == currentWidth && newHeight == currentHeight)
 			return;
+		
+		/* Checks whether the requested size looks likely to fail to
+		   allocate before ever attempting the resize, rather than
+		   discovering that partway through HandleWindowResized() (by
+		   which point DisposeOffscreenStore() has already freed the
+		   old, working offscreen store - real testing crashed here,
+		   at a size too large for available memory, before this
+		   check existed). MaxMem() actively compacts and purges the
+		   heap and returns the actual largest contiguous block
+		   achievable, rather than FreeMem()'s total free space, which
+		   Inside Macintosh itself notes usually can't be allocated as
+		   one block due to fragmentation - MaxMem() is the more
+		   reliable answer to "would this specific allocation actually
+		   succeed right now". */
+		neededBytes    = EstimateOffscreenBytesNeeded(newWidth, newHeight);
+		availableBytes = MaxMem(&grow);
+		
+		if (neededBytes > availableBytes) {
+			if (!ConfirmUseLargestSize())
+				return;
+			
+			FindLargestSizeFittingMemory(maxWidth, maxHeight, availableBytes, &newWidth, &newHeight);
+			
+			if (newWidth == currentWidth && newHeight == currentHeight)
+				return;
+		}
 		
 		SizeWindow(mwWindow, newWidth, newHeight, true);
 		HandleWindowResized(newWidth, newHeight);
