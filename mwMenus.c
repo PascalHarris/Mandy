@@ -9,7 +9,7 @@
 #include "mwWindow.h"
 #include "mwInfo.h"
 #include "mwSaveAs.h"
-#include "mwColorCycle.h"
+#include "mwColourCycle.h"
 #ifndef _Memory_
 #include <Memory.h>
 #endif
@@ -48,7 +48,7 @@ enum {
    number is width - see HandleMenu()'s fractalID case); item 4 is a
    divider; paletteItem is the hierarchical Palette submenu; animateItem
    is the "Animate"/"Stop Animation" toggle below it - see
-   mwColorCycle.h; zoomOutItem, directly below that, resets gView to
+   mwColourCycle.h; zoomOutItem, directly below that, resets gView to
    the current fractal's own default view - see
    ResetViewForCurrentFractal()/RestoreDefaultViewFromCache() in
    mwWindow.h. */
@@ -77,7 +77,7 @@ void SetUpMenus(void) {
        this menu's (1-based) item numbers straight onto that array's
        (0-based) indices. */
     paletteMenu = NewMenu(paletteMenuID, "\pPalette");
-    AppendMenu(paletteMenu, "\pDefault;Night;Stormy;Summery;Autumnal;Wintery;Pastel;Rainbow;Fire;Ocean;Grayscale");
+    AppendMenu(paletteMenu, "\pDefault;Night;Stormy;Summery;Autumnal;Wintery;Pastel;Rainbow;Fire;Ocean;Greyscale");
     InsertMenu(paletteMenu, -1);	/* -1 = hierMenu: install as a submenu, not into the visible menu bar */
     
     /* Locks this handle's block so it can never move. Real testing
@@ -116,7 +116,7 @@ void SetUpMenus(void) {
    actively in progress - Save As and Zoom Out because the offscreen
    store they'd read from or write to is still being written to by
    the render itself; Animate because AnimationTask() (see
-   mwColorCycle.c) already declines to do anything mid-render anyway,
+   mwColourCycle.c) already declines to do anything mid-render anyway,
    so disabling the item just makes that visible rather than letting
    it look like a click did nothing. All three use IsRenderActive() in
    mwWindow.c. A finished OR aborted render leaves them enabled either

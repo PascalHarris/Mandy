@@ -74,7 +74,7 @@
 #endif
 
 extern	WindowPtr	mwWindow;
-extern	Boolean		gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
+extern	Boolean		gHasColourQD;	/* set once in MandyWindow.c's InitMacintosh() */
 
 /* Below this, in either dimension, a marquee is treated as an
    accidental click-drag rather than a deliberate selection - avoids
@@ -287,7 +287,7 @@ static Boolean DialogItemTitleIs(DialogPtr dialog, short itemNumber, const unsig
 	return PascalStringsEqual(itemTitle, expectedTitle);
 }
 
-/* CenterDialogOverMainWindow()
+/* CentreDialogOverMainWindow()
    Repositions dialog so its centre lands on mwWindow's own centre, in
    global coordinates - called before the dialog is ever shown, so
    there's no visible jump from wherever its DLOG resource happened to
@@ -309,7 +309,7 @@ static Boolean DialogItemTitleIs(DialogPtr dialog, short itemNumber, const unsig
    multiple-monitor system.
    
    Falls back to screenBits.bounds (the only screen that could
-   possibly exist) when gHasColorQD is false: multiple screens require
+   possibly exist) when gHasColourQD is false: multiple screens require
    Color QuickDraw's Device Manager extensions in the first place,
    true of every real Mac Plus, this project's stated minimum target.
    Also falls back there if GetMaxDevice() can't find a screen the
@@ -332,7 +332,7 @@ static void GetScreenBoundsForWindow(Rect *outBounds) {
 	Rect		windowGlobalRect;
 	GDHandle	device;
 	
-	if (!gHasColorQD) {
+	if (!gHasColourQD) {
 		*outBounds = screenBits.bounds;
 		return;
 	}
@@ -349,7 +349,7 @@ static void GetScreenBoundsForWindow(Rect *outBounds) {
 	*outBounds = device ? (**device).gdRect : screenBits.bounds;
 }
 
-/* CenterDialogOverMainWindow()
+/* CentreDialogOverMainWindow()
    Repositions dialog so its centre lands on mwWindow's own centre, in
    global coordinates - called before the dialog is ever shown, so
    there's no visible jump from wherever its DLOG resource happened to
@@ -370,7 +370,7 @@ static void GetScreenBoundsForWindow(Rect *outBounds) {
    nudging the window-centred position back onto the screen, avoids
    the dialog ending up pinned against one edge - centred on
    something, rather than arbitrarily placed. */
-static void CenterDialogOverMainWindow(DialogPtr dialog) {
+static void CentreDialogOverMainWindow(DialogPtr dialog) {
 	GrafPtr	savedPort;
 	Point	windowTopLeft;
 	short	windowWidth, windowHeight;
@@ -424,7 +424,7 @@ static void CenterDialogOverMainWindow(DialogPtr dialog) {
    Checks for the DLOG resource explicitly, via GetResource()/ResError(),
    before ever calling GetNewDialog() - rather than relying solely on
    GetNewDialog() itself to fail gracefully when the resource is
-   missing. Also centres the dialog over mwWindow (CenterDialogOverMainWindow())
+   missing. Also centres the dialog over mwWindow (CentreDialogOverMainWindow())
    and forces it on screen via ShowWindow()/SelectWindow() regardless
    of the resource's own "initially visible" flag. The last two came
    from real testing: mwWindow can be dragged and resized, so a fixed
@@ -475,19 +475,19 @@ static Boolean ShowConfirmationDialog(short dialogID, const unsigned char *affir
 	
 	/* Forces the dialog invisible before repositioning it, regardless
 	   of the DLOG resource's own "initially visible" flag - the first
-	   dialog built had that flag unchecked (see CenterDialogOverMainWindow()'s
+	   dialog built had that flag unchecked (see CentreDialogOverMainWindow()'s
 	   caller below forcing it back on), but real testing found a
 	   white hole punched in mwWindow's own top-left corner, matching
 	   the dialog's size, that persisted until the dialog closed -
 	   consistent with the dialog briefly existing, visible, at its
 	   original resource position (close to mwWindow's own top-left)
-	   before CenterDialogOverMainWindow() moves it, and mwWindow's
+	   before CentreDialogOverMainWindow() moves it, and mwWindow's
 	   own update for the area that briefly covered never getting
 	   processed while ModalDialog()'s own event loop has control.
 	   Hiding first, moving, then showing again makes this safe
 	   regardless of what either DLOG resource's flag actually says. */
 	HideWindow(dialog);
-	CenterDialogOverMainWindow(dialog);
+	CentreDialogOverMainWindow(dialog);
 	
 	ShowWindow(dialog);
 	SelectWindow(dialog);
@@ -582,7 +582,7 @@ static void FindLargestSizeFittingMemory(short maxWidth, short maxHeight, long a
    SetPort(), FrameRect(), PenMode(), GetMouse() - is already proven
    working via TrackMarqueeAndZoom()). Given this project's history of
    exactly this pattern (CTabChanged(), PmForeColor() - see
-   mwColorCycle.c/mwWindow.c), removing the untested call outright
+   mwColourCycle.c/mwWindow.c), removing the untested call outright
    seemed a safer fix than chasing down why it crashed.
    
    The real cost of dropping the Window Manager port: the outline is

@@ -1,5 +1,5 @@
 /*****
- * mwColorCycle.c
+ * mwColourCycle.c
  *
  *		The Fractal menu's Animate/Stop Animation feature.
  *
@@ -8,7 +8,7 @@
  *		changes, which is why it can run smoothly even on very old
  *		hardware: nothing gets redrawn, just reinterpreted. This file
  *		does exactly that with the fractal's own offscreen colour
- *		table (see mwWindow.h's GetOffscreenColorTable()) rather than
+ *		table (see mwWindow.h's GetOffscreenColourTable()) rather than
  *		anything screen-wide, so it only ever affects this one window.
  *
  *		On black-and-white Macs there's no colour table to rotate, so
@@ -27,7 +27,7 @@
  *		once-every-couple-of-ticks check isn't worth what it would add.
  *
  *****/
-#include "mwColorCycle.h"
+#include "mwColourCycle.h"
 #include "mwWindow.h"
 #ifndef _Quickdraw_
 #include <Quickdraw.h>
@@ -54,7 +54,7 @@ static short			gPatternPhase = 0;
    direction animation always ran before this existed. */
 static Boolean			gAnimationDirectionForward = true;
 
-static void RotateColorTable(CTabHandle table, Boolean forward);
+static void RotateColourTable(CTabHandle table, Boolean forward);
 static void AdvanceOneFrame(Boolean forward);
 
 void ToggleAnimation(void) {
@@ -67,7 +67,7 @@ Boolean IsAnimationActive(void) {
 }
 
 /* AnimationTask()
-   See mwColorCycle.h. Declines to do anything - without disturbing
+   See mwColourCycle.h. Declines to do anything - without disturbing
    gLastAnimationTick, so the next eligible tick still fires on
    schedule - while a render is in progress: mid-render, the offscreen
    image (and, for mono, the recorded shade levels behind
@@ -95,7 +95,7 @@ void AnimationTask(void) {
 }
 
 /* AnimationArrowKeyPressed()
-   See mwColorCycle.h. forward is true for up/right, false for
+   See mwColourCycle.h. forward is true for up/right, false for
    down/left (MandyWindow.c's HandleEvent() maps the actual key codes).
    
    Always records the new direction, even while animation is running
@@ -129,13 +129,13 @@ void AnimationArrowKeyPressed(Boolean forward) {
    single-step arrow-key handler (AnimationArrowKeyPressed()) - both
    do exactly this, just on different triggers. */
 static void AdvanceOneFrame(Boolean forward) {
-	if (IsRenderingInColor()) {
-		CTabHandle table = GetOffscreenColorTable();
+	if (IsRenderingInColour()) {
+		CTabHandle table = GetOffscreenColourTable();
 		
 		if (table == NULL)
 			return;
 		
-		RotateColorTable(table, forward);
+		RotateColourTable(table, forward);
 	} else {
 		gPatternPhase += forward ? 1 : -1;
 		ApplyMonoPatternPhase(gPatternPhase);
@@ -144,12 +144,12 @@ static void AdvanceOneFrame(Boolean forward) {
 	RefreshWholeDisplay();
 }
 
-/* RotateColorTable()
+/* RotateColourTable()
    Shifts every entry's RGB by one slot - forward wraps the last entry
    around to become the first; backward is the exact reverse, wrapping
    the first entry around to become the last - a standard colour-
    cycling rotation, run either direction. Directly mutates the
-   offscreen GWorld's own colour table (see GetOffscreenColorTable())
+   offscreen GWorld's own colour table (see GetOffscreenColourTable())
    rather than going through SetGWorld() or any Palette Manager call:
    SetGWorld() is confirmed, from earlier testing on this project, to
    crash on real hardware, and the Palette Manager routines this
@@ -165,8 +165,8 @@ static void AdvanceOneFrame(Boolean forward) {
    rather than assuming a fixed range, so this stays correct if the
    fractal colour ramp's own entry count (kShadingScale+1, in
    mwWindow.c) ever changes. */
-static void RotateColorTable(CTabHandle table, Boolean forward) {
-	short		entryCount = GetRotatableColorTableEntryCount();
+static void RotateColourTable(CTabHandle table, Boolean forward) {
+	short		entryCount = GetRotatableColourTableEntryCount();
 	RGBColor	wrapped;
 	short		i;
 	
@@ -198,7 +198,7 @@ static void RotateColorTable(CTabHandle table, Boolean forward) {
 	   an "undefined" error on real testing) - the same kind of gap
 	   PmForeColor() hit earlier (see ShadeBlock() in mwWindow.c).
 	   GetCTSeed() is a much more basic call already proven to link
-	   here: BuildFractalColorTable() already uses it, the same way,
+	   here: BuildFractalColourTable() already uses it, the same way,
 	   to set this table's seed when it's first built. */
 	(**table).ctSeed = GetCTSeed();
 }

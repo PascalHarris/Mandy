@@ -12,7 +12,7 @@
 #include <Quickdraw.h>
 #endif
 
-extern	Boolean	gHasColorQD;	/* set once in MandyWindow.c's InitMacintosh() */
+extern	Boolean	gHasColourQD;	/* set once in MandyWindow.c's InitMacintosh() */
 
 #define windowX 0
 #define windowY 40
@@ -209,14 +209,14 @@ double ClampHalfWidthRe(double proposedHalfWidthRe) {
 /* Offscreen pixel store --------------------------------------------
    The progressive renderer draws into this buffer; DrawContent() then
    just copies finished pixels onto the screen. Two different
-   technologies back it depending on gHasColorQD:
+   technologies back it depending on gHasColourQD:
    
    - Monochrome: a plain BitMap with a manually allocated
      baseAddr/rowBytes, wrapped in an ordinary GrafPort. This is the
      classic pre-Color QuickDraw offscreen-bitmap technique, so it
      works unmodified on real Mac Plus hardware.
    - Colour: an 8-bit indexed GWorld with a small custom colour table
-     (see BuildFractalColorTable()) built to hold a smooth ramp across
+     (see BuildFractalColourTable()) built to hold a smooth ramp across
      kShadingScale. 8-bit indexed, rather than matching the screen's
      actual depth, is deliberate: CopyBits() automatically dithers
      this down to whatever the real screen supports (4-bit and up),
@@ -224,7 +224,7 @@ double ClampHalfWidthRe(double proposedHalfWidthRe) {
      (the "trippy" effect on the roadmap) needs to rewrite cheaply.
    
    Only one of offscreenPort/offscreenBits or offscreenGWorld is ever
-   live at a time, selected by gHasColorQD; offscreenBounds and
+   live at a time, selected by gHasColourQD; offscreenBounds and
    offscreenReady describe whichever one is current. */
 static GrafPort		offscreenPort;
 static BitMap		offscreenBits;
@@ -333,7 +333,7 @@ static void CacheOffscreenAsDefaultViewIfApplicable(void) {
 	
 	BlockMove(bits->baseAddr, gDefaultViewCachePixels, pixelsSize);
 	
-	if (!gHasColorQD && gMonoShadeLevels != NULL) {
+	if (!gHasColourQD && gMonoShadeLevels != NULL) {
 		long shadeLevelsSize = (long) gMonoShadeLevelColumns * gMonoShadeLevelRows;
 		
 		if (gDefaultViewCacheShadeLevels == NULL)
@@ -402,11 +402,11 @@ static short		IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, shor
 static short		SampleMandelbrot(short x, short y);
 static short		SampleJulia(short x, short y);
 static short		ShadeLevelForIterationCount(short iterationCount, short maxIterations);
-static RGBColor		ColorForShadeLevel(short shadeLevel);
+static RGBColor		ColourForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
-static CTabHandle	BuildFractalColorTable(void);
+static CTabHandle	BuildFractalColourTable(void);
 static short		CurrentFinestBlockSize(void);
-static Boolean		ShouldRenderInColor(void);
+static Boolean		ShouldRenderInColour(void);
 static void			ShadeBlock(const Rect *blockRect, short shadeLevel);
 static void			FillIndexedRect(const Rect *blockRect, short shadeLevel);
 static short		MonoBandIndexForShadeLevel(short shadeLevel, short phase);
@@ -417,7 +417,7 @@ static short		BlocksAcross(short span, short blockSize);
 static short		HighestPowerOfTwoAtMost(short n);
 static void			MapIndexToQuadrantOrder(long index, short left, short top, short width, short height, short *outColumn, short *outRow);
 static Boolean		AllocateOffscreenMonoStore(void);
-static Boolean		AllocateOffscreenColorStore(void);
+static Boolean		AllocateOffscreenColourStore(void);
 static Boolean		AllocateOffscreenStore(void);
 static void			DisposeOffscreenStore(void);
 static void			StartProgressiveRender(FractalSampleProc sampleProc);
@@ -429,8 +429,8 @@ static void			EnterOffscreenPort(void);
 static void			EnterWindowPort(void);
 static void			BlitOffscreenToWindow(const Rect *changedRect);
 static void			DrawBranchDirectly(float x1, float y1, float angle, float depth);
-static void			DrawIndexedLine(short x1, short y1, short x2, short y2, short colorIndex);
-static short		BranchColorIndexForDepth(short depth);
+static void			DrawIndexedLine(short x1, short y1, short x2, short y2, short colourIndex);
+static short		BranchColourIndexForDepth(short depth);
 static short		RecursiveFractalBackgroundIndex(void);
 
 /* SetUpWindow()
@@ -444,7 +444,7 @@ static short		RecursiveFractalBackgroundIndex(void);
 void SetUpWindow(void) {
     dragRect = screenBits.bounds;
     
-    if (gHasColorQD)
+    if (gHasColourQD)
         mwWindow = NewCWindow(0L, &windowBounds, kIdleWindowTitle, true, documentProc, (WindowPtr) -1L, true, 0);
     else
         mwWindow = NewWindow(0L, &windowBounds, kIdleWindowTitle, true, documentProc, (WindowPtr) -1L, true, 0);
@@ -458,7 +458,7 @@ void SetUpWindow(void) {
    DrawBranchDirectly() call at both call sites (RenderFractalOffscreen(),
    DrawFractalDirectly()) - never actually varies, so it's a constant
    rather than a parameter threaded through the recursion. Also drives
-   BranchColorIndexForDepth()'s base-to-tip colour mapping: depth
+   BranchColourIndexForDepth()'s base-to-tip colour mapping: depth
    kTreeInitialDepth is the trunk (drawn first), depth 1 is the last
    segment actually drawn before the depth-0 base case ends that
    branch (the closest thing to a "tip" this recursion reaches). */
@@ -472,7 +472,7 @@ void SetUpWindow(void) {
    
    In colour, writes each segment via DrawIndexedLine() - a plain
    pixel-by-pixel write into the offscreen store's own memory - coloured
-   by BranchColorIndexForDepth(), rather than through LineTo()/
+   by BranchColourIndexForDepth(), rather than through LineTo()/
    ForeColor(): QuickDraw's own colour-setting calls are exactly what
    ShadeBlock()'s own comment (and FillIndexedRect(), which takes the
    same direct-write approach for rects) already found unreliable on
@@ -485,9 +485,9 @@ void DrawBranch(float x1, float y1, float angle, float depth) {
 		float x2 = x1 + cos(angle*(pi/180.0))*depth*10;
 		float y2 = y1 + sin(angle*(pi/180.0))*depth*10;
 		
-		if (gHasColorQD) {
-			short colorIndex = BranchColorIndexForDepth((short) depth);
-			DrawIndexedLine((short) x1, (short) (windowHeight - y1), (short) x2, (short) (windowHeight - y2), colorIndex);
+		if (gHasColourQD) {
+			short colourIndex = BranchColourIndexForDepth((short) depth);
+			DrawIndexedLine((short) x1, (short) (windowHeight - y1), (short) x2, (short) (windowHeight - y2), colourIndex);
 		} else {
 			MoveTo(x1,windowHeight-y1);
 			Line(x2-x1,y1-y2);
@@ -694,8 +694,8 @@ static short ShadeLevelForIterationCount(short iterationCount, short maxIteratio
    depending on the palette's own aesthetic, kShadingScale (slow
    escape, or never) is the palette's other extreme. Each palette is
    its own list of colour stops, interpolated the same way regardless
-   of how many stops it has - a palette with 3 stops (Grayscale) and
-   one with 7 (Rainbow) are handled identically by ColorForShadeLevel().
+   of how many stops it has - a palette with 3 stops (Greyscale) and
+   one with 7 (Rainbow) are handled identically by ColourForShadeLevel().
    
    Order in kPalettes[] must match the Palette submenu's AppendMenu()
    string in mwMenus.c exactly - GetCurrentPalette()/SetCurrentPalette()
@@ -703,30 +703,30 @@ static short ShadeLevelForIterationCount(short iterationCount, short maxIteratio
    menu item number maps onto directly. */
 typedef struct {
 	short		shadeLevel;
-	RGBColor	color;
-} ColorRampStop;
+	RGBColor	colour;
+} ColourRampStop;
 
 /* The offscreen colour table reserves two fixed entries beyond the
    kShadingScale+1 palette-driven shading range: a genuine white and a
    genuine black, used only as backgrounds for recursive/direct-draw
    fractals (currently just the Tree - see RecursiveFractalBackgroundIndex()
    and DrawBranch()). Neither is ever touched by a palette rebuild
-   (RebuildOffscreenColorTableForCurrentPalette() only ever writes
+   (RebuildOffscreenColourTableForCurrentPalette() only ever writes
    0..kShadingScale) or by Animate's colour-table rotation
-   (mwColorCycle.c's RotateColorTable() only ever rotates that same
-   range, via GetRotatableColorTableEntryCount()) - they stay a true
+   (mwColourCycle.c's RotateColourTable() only ever rotates that same
+   range, via GetRotatableColourTableEntryCount()) - they stay a true
    white and true black regardless of which palette is active or how
    far it's been rotated, which matters for a palette like Night that
    has no true white or black stop of its own to fall back on. */
 #define kBackgroundWhiteIndex	(kShadingScale + 1)
 #define kBackgroundBlackIndex	(kShadingScale + 2)
-#define kColorTableEntryCount	(kShadingScale + 3)
+#define kColourTableEntryCount	(kShadingScale + 3)
 
-#define kMaxColorRampStops	7
+#define kMaxColourRampStops	7
 
 typedef struct {
 	short			stopCount;
-	ColorRampStop	stops[kMaxColorRampStops];
+	ColourRampStop	stops[kMaxColourRampStops];
 } PaletteDefinition;
 
 static const PaletteDefinition kPalettes[] = {
@@ -813,7 +813,7 @@ static const PaletteDefinition kPalettes[] = {
 		{ (kShadingScale * 2) / 3, { 0,     32768, 40960 } },
 		{ kShadingScale,           { 0,     4096,  16384 } }
 	}},
-	/* Grayscale (suggested) - pure white through mid grey to black, no
+	/* Greyscale (suggested) - pure white through mid grey to black, no
 	   hue at all - a plain baseline, and cheap to reason about when
 	   debugging shading itself independent of any palette's own
 	   colour choices. */
@@ -837,11 +837,11 @@ static unsigned short InterpolateComponent(unsigned short from, unsigned short t
 	return (unsigned short) (from + (to - from) * fraction);
 }
 
-/* ColorForShadeLevel()
+/* ColourForShadeLevel()
    Finds the pair of the current palette's ramp stops shadeLevel falls
    between and linearly blends their colours - identical logic
    regardless of which palette is selected or how many stops it has. */
-static RGBColor ColorForShadeLevel(short shadeLevel) {
+static RGBColor ColourForShadeLevel(short shadeLevel) {
 	const PaletteDefinition *palette = &kPalettes[currentPalette];
 	short i;
 	
@@ -852,14 +852,14 @@ static RGBColor ColorForShadeLevel(short shadeLevel) {
 			double fraction   = (rangeEnd > rangeStart) ? (double) (shadeLevel - rangeStart) / (rangeEnd - rangeStart) : 0.0;
 			RGBColor result;
 			
-			result.red   = InterpolateComponent(palette->stops[i-1].color.red,   palette->stops[i].color.red,   fraction);
-			result.green = InterpolateComponent(palette->stops[i-1].color.green, palette->stops[i].color.green, fraction);
-			result.blue  = InterpolateComponent(palette->stops[i-1].color.blue,  palette->stops[i].color.blue,  fraction);
+			result.red   = InterpolateComponent(palette->stops[i-1].colour.red,   palette->stops[i].colour.red,   fraction);
+			result.green = InterpolateComponent(palette->stops[i-1].colour.green, palette->stops[i].colour.green, fraction);
+			result.blue  = InterpolateComponent(palette->stops[i-1].colour.blue,  palette->stops[i].colour.blue,  fraction);
 			return result;
 		}
 	}
 	
-	return palette->stops[palette->stopCount - 1].color;
+	return palette->stops[palette->stopCount - 1].colour;
 }
 
 /* IsCurrentPaletteDark()
@@ -878,8 +878,8 @@ static Boolean IsCurrentPaletteDark(void) {
 	short i;
 	
 	for (i = 0; i < palette->stopCount; i++) {
-		RGBColor color = palette->stops[i].color;
-		total += ((long) color.red * 30 + (long) color.green * 59 + (long) color.blue * 11) / 100;
+		RGBColor colour = palette->stops[i].colour;
+		total += ((long) colour.red * 30 + (long) colour.green * 59 + (long) colour.blue * 11) / 100;
 	}
 	
 	return (total / palette->stopCount) < 32768;
@@ -900,24 +900,24 @@ static short RecursiveFractalBackgroundIndex(void) {
 	return IsCurrentPaletteDark() ? kBackgroundWhiteIndex : kBackgroundBlackIndex;
 }
 
-/* BranchColorIndexForDepth()
+/* BranchColourIndexForDepth()
    Maps DrawBranch()'s current recursion depth onto a palette index
    spanning the full shading range: kTreeInitialDepth (the trunk, drawn
    first) to 0, and depth 1 (the last segment actually drawn before
    the depth-0 base case ends a branch, the closest this recursion
    gets to a "tip") to kShadingScale - so Animate's existing
-   colour-table rotation (mwColorCycle.c), completely unchanged,
+   colour-table rotation (mwColourCycle.c), completely unchanged,
    already produces the requested "cycle from base to tip through the
    palette" effect once branches carry these indices: rotating the
    table shifts whichever colour was at the trunk toward the tips (or
    the reverse, depending on rotation direction), with no
    animation-specific code of its own needed here. */
-static short BranchColorIndexForDepth(short depth) {
+static short BranchColourIndexForDepth(short depth) {
 	return (short) (((kTreeInitialDepth - depth) * kShadingScale) / (kTreeInitialDepth - 1));
 }
 
-/* BuildFractalColorTable()
-   Hand-builds a ColorTable of kColorTableEntryCount entries (a Handle
+/* BuildFractalColourTable()
+   Hand-builds a ColorTable of kColourTableEntryCount entries (a Handle
    sized for ColorTable's trailing variable-length ctTable array): one
    per possible shadeLevel (0..kShadingScale), so the offscreen
    GWorld's CLUT is our own fractal ramp rather than the system
@@ -927,34 +927,34 @@ static short BranchColorIndexForDepth(short depth) {
    from it rather than keeping it, so it should be disposed (via
    DisposeCTable()) once passed to NewGWorld(). Returns NULL on low
    memory. */
-static CTabHandle BuildFractalColorTable(void) {
-	long		tableSize  = sizeof(ColorTable) + (long) (kColorTableEntryCount - 1) * sizeof(ColorSpec);
-	CTabHandle	colorTable = (CTabHandle) NewHandle(tableSize);
+static CTabHandle BuildFractalColourTable(void) {
+	long		tableSize  = sizeof(ColorTable) + (long) (kColourTableEntryCount - 1) * sizeof(ColorSpec);
+	CTabHandle	colourTable = (CTabHandle) NewHandle(tableSize);
 	short		i;
 	
-	if (colorTable == NULL)
+	if (colourTable == NULL)
 		return NULL;
 	
-	(**colorTable).ctSeed  = GetCTSeed();
-	(**colorTable).ctFlags = 0;
-	(**colorTable).ctSize  = kColorTableEntryCount - 1;
+	(**colourTable).ctSeed  = GetCTSeed();
+	(**colourTable).ctFlags = 0;
+	(**colourTable).ctSize  = kColourTableEntryCount - 1;
 	
 	for (i = 0; i <= kShadingScale; i++) {
-		(**colorTable).ctTable[i].value = i;
-		(**colorTable).ctTable[i].rgb   = ColorForShadeLevel(i);
+		(**colourTable).ctTable[i].value = i;
+		(**colourTable).ctTable[i].rgb   = ColourForShadeLevel(i);
 	}
 	
-	(**colorTable).ctTable[kBackgroundWhiteIndex].value     = kBackgroundWhiteIndex;
-	(**colorTable).ctTable[kBackgroundWhiteIndex].rgb.red   = 65535;
-	(**colorTable).ctTable[kBackgroundWhiteIndex].rgb.green = 65535;
-	(**colorTable).ctTable[kBackgroundWhiteIndex].rgb.blue  = 65535;
+	(**colourTable).ctTable[kBackgroundWhiteIndex].value     = kBackgroundWhiteIndex;
+	(**colourTable).ctTable[kBackgroundWhiteIndex].rgb.red   = 65535;
+	(**colourTable).ctTable[kBackgroundWhiteIndex].rgb.green = 65535;
+	(**colourTable).ctTable[kBackgroundWhiteIndex].rgb.blue  = 65535;
 	
-	(**colorTable).ctTable[kBackgroundBlackIndex].value     = kBackgroundBlackIndex;
-	(**colorTable).ctTable[kBackgroundBlackIndex].rgb.red   = 0;
-	(**colorTable).ctTable[kBackgroundBlackIndex].rgb.green = 0;
-	(**colorTable).ctTable[kBackgroundBlackIndex].rgb.blue  = 0;
+	(**colourTable).ctTable[kBackgroundBlackIndex].value     = kBackgroundBlackIndex;
+	(**colourTable).ctTable[kBackgroundBlackIndex].rgb.red   = 0;
+	(**colourTable).ctTable[kBackgroundBlackIndex].rgb.green = 0;
+	(**colourTable).ctTable[kBackgroundBlackIndex].rgb.blue  = 0;
 	
-	return colorTable;
+	return colourTable;
 }
 
 /* CurrentScreenDepth()
@@ -972,28 +972,28 @@ short CurrentScreenDepth(void) {
 	return (**mainDevicePixMap).pixelSize;
 }
 
-/* ShouldRenderInColor()
-   Colour QuickDraw being present isn't by itself a reason to draw in
+/* ShouldRenderInColour()
+   Color QuickDraw being present isn't by itself a reason to draw in
    colour: at 1-bit and 2-bit depths the render should look exactly
    like a genuine black-and-white Mac, with no attempt at colour at
    all, rather than colour that then gets dithered down to almost
    nothing meaningful. This is the single place that decision is made;
    ShadeBlock() and CurrentFinestBlockSize() both defer to it instead
-   of checking gHasColorQD directly. */
-static Boolean ShouldRenderInColor(void) {
-	return gHasColorQD && (CurrentScreenDepth() >= 4);
+   of checking gHasColourQD directly. */
+static Boolean ShouldRenderInColour(void) {
+	return gHasColourQD && (CurrentScreenDepth() >= 4);
 }
 
 /* CurrentFinestBlockSize()
    Colour refines all the way to real 1x1 pixels. Monochrome - which
    now includes 1-bit and 2-bit colour screens, not just genuinely
-   monochrome ones, see ShouldRenderInColor() - stops one level short,
+   monochrome ones, see ShouldRenderInColour() - stops one level short,
    at 2x2, leaving room for a dither pattern to simulate colour at the
    finest visible unit - the same 2x2 granularity the original
    hand-written Mandelbrot()/Julia() sampled at, now generalised to
    every block size via ShadeBlock(). */
 static short CurrentFinestBlockSize(void) {
-	return ShouldRenderInColor() ? 1 : 2;
+	return ShouldRenderInColour() ? 1 : 2;
 }
 
 /* ShadeBlock()
@@ -1007,7 +1007,7 @@ static short CurrentFinestBlockSize(void) {
    ShadeLevelForIterationCount(), it left "black" firing for almost
    any non-trivial iteration count (roughly shadeLevel > 32 turns out
    to correspond to a raw Mandelbrot iteration count of only about 7
-   out of 64) - washing out the characteristic gray detail band into a
+   out of 64) - washing out the characteristic grey detail band into a
    solid black interior, a real regression caught on real testing.
    Evenly dividing the range instead spreads the five bands back
    across where log-scaled values actually land. This affects only
@@ -1017,7 +1017,7 @@ static short CurrentFinestBlockSize(void) {
    In colour it's a direct pixel-memory write via FillIndexedRect()
    rather than any QuickDraw colour-setting call: shadeLevel already
    *is* the correct index into our own colour table
-   (BuildFractalColorTable() constructs it that way on purpose), so
+   (BuildFractalColourTable() constructs it that way on purpose), so
    there's nothing to search for or match - we already know the exact
    byte we want written. This is the second colour-setting approach
    tried here. RGBForeColor() searched a colour table for the nearest
@@ -1034,14 +1034,14 @@ static short CurrentFinestBlockSize(void) {
    
    The mono threshold ladder itself lives in MonoBandIndexForShadeLevel()
    /FillMonoBand() now, not inline here, so ApplyMonoPatternPhase() (see
-   mwColorCycle.c's Animate feature) can redraw a cell from a
+   mwColourCycle.c's Animate feature) can redraw a cell from a
    previously-recorded shade level using the same ladder, just with a
    phase added in. Recording that shade level, via
    RecordMonoShadeLevels(), runs whenever gMonoShadeLevels exists (see
    AllocateOffscreenMonoStore()) - a NULL check, essentially free, for
    the low-memory fallback path where it doesn't. */
 static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
-	if (ShouldRenderInColor()) {
+	if (ShouldRenderInColour()) {
 		FillIndexedRect(blockRect, shadeLevel);
 		return;
 	}
@@ -1058,7 +1058,7 @@ static void ShadeBlock(const Rect *blockRect, short shadeLevel) {
    ladder ShadeBlock() always used, then adds phase and wraps, so
    ApplyMonoPatternPhase()'s animated redraw and this file's normal
    rendering share one definition of where the bands fall. phase is 0
-   for normal rendering (see ShadeBlock()), and mwColorCycle.c's
+   for normal rendering (see ShadeBlock()), and mwColourCycle.c's
    current animation phase otherwise. */
 static short MonoBandIndexForShadeLevel(short shadeLevel, short phase) {
 	short bandIndex;
@@ -1131,7 +1131,7 @@ static void RecordMonoShadeLevels(const Rect *blockRect, short shadeLevel) {
 /* FillIndexedRect()
    Writes shadeLevel directly into every pixel byte of blockRect in
    the offscreen GWorld's own pixel memory - only ever called once
-   ShouldRenderInColor() is true, so the GWorld (8 bits per pixel, one
+   ShouldRenderInColour() is true, so the GWorld (8 bits per pixel, one
    byte per pixel) is known to exist and be locked. rowBytes carries
    two flag bits above the actual per-row byte count for a genuine
    PixMap (the same bits CopyBits() itself relies on elsewhere in this
@@ -1152,7 +1152,7 @@ static void FillIndexedRect(const Rect *blockRect, short shadeLevel) {
 }
 
 /* DrawIndexedLine()
-   Draws a straight line by writing colorIndex bytes directly into the
+   Draws a straight line by writing colourIndex bytes directly into the
    offscreen store's PixMap memory, pixel by pixel via a plain integer
    Bresenham walk - the same direct-write technique FillIndexedRect()
    uses for rects, and for the same reason: QuickDraw's own
@@ -1165,7 +1165,7 @@ static void FillIndexedRect(const Rect *blockRect, short shadeLevel) {
    direct memory write isn't automatically clipped by QuickDraw the
    way LineTo() would be - the Tree's branches can compute endpoints
    slightly outside the image at the widest angles. */
-static void DrawIndexedLine(short x1, short y1, short x2, short y2, short colorIndex) {
+static void DrawIndexedLine(short x1, short y1, short x2, short y2, short colourIndex) {
 	PixMapHandle	pixMap   = ((CGrafPtr) offscreenGWorld)->portPixMap;
 	Ptr				baseAddr = (**pixMap).baseAddr;
 	long			rowBytes = (**pixMap).rowBytes & 0x3FFF;
@@ -1177,7 +1177,7 @@ static void DrawIndexedLine(short x1, short y1, short x2, short y2, short colorI
 	
 	for (;;) {
 		if (x1 >= 0 && x1 < windowWidth && y1 >= 0 && y1 < windowHeight)
-			*((unsigned char *) baseAddr + (long) y1 * rowBytes + x1) = (unsigned char) colorIndex;
+			*((unsigned char *) baseAddr + (long) y1 * rowBytes + x1) = (unsigned char) colourIndex;
 		
 		if (x1 == x2 && y1 == y2)
 			break;
@@ -1317,7 +1317,7 @@ static void MapIndexToQuadrantOrder(long index, short left, short top, short wid
    called right after AllocateOffscreenStore() succeeds), which
    populates every entry via RecordMonoShadeLevels() - so by the time
    animation could possibly run (it never runs mid-render - see
-   AnimationTask() in mwColorCycle.c), the buffer is guaranteed
+   AnimationTask() in mwColourCycle.c), the buffer is guaranteed
    accurate. Allocating it lazily on first use, instead, left it full
    of NewPtr()'s uninitialised memory with no render left to come
    along and overwrite it - real testing showed exactly that: the
@@ -1362,7 +1362,7 @@ static Boolean AllocateOffscreenMonoStore(void) {
     return true;
 }
 
-/* AllocateOffscreenColorStore()
+/* AllocateOffscreenColourStore()
    Creates an 8-bit indexed GWorld the size of imageStart, using our
    own fractal colour ramp rather than the system's default CLUT. The
    pixels are locked for the GWorld's whole lifetime (see
@@ -1370,15 +1370,15 @@ static Boolean AllocateOffscreenMonoStore(void) {
    since it's small (well under 512K's headroom even though colour
    Macs never actually run this tight on memory) and locking once is
    one less thing to get wrong at every call site. */
-static Boolean AllocateOffscreenColorStore(void) {
-	CTabHandle	fractalColors = BuildFractalColorTable();
+static Boolean AllocateOffscreenColourStore(void) {
+	CTabHandle	fractalColours = BuildFractalColourTable();
 	QDErr		error;
 	
-	if (fractalColors == NULL)
+	if (fractalColours == NULL)
 		return false;
 	
-	error = NewGWorld(&offscreenGWorld, 8, &imageStart, fractalColors, NULL, 0);
-	DisposeCTable(fractalColors);	/* NewGWorld() copies what it needs, per Inside Mac - see chat */
+	error = NewGWorld(&offscreenGWorld, 8, &imageStart, fractalColours, NULL, 0);
+	DisposeCTable(fractalColours);	/* NewGWorld() copies what it needs, per Inside Mac - see chat */
 	
 	if (error != noErr)
 		return false;
@@ -1395,7 +1395,7 @@ static Boolean AllocateOffscreenColorStore(void) {
    Picks monochrome or colour storage and, on success, records the
    bounds every caller shares regardless of which technology backed it. */
 static Boolean AllocateOffscreenStore(void) {
-	if (!(gHasColorQD ? AllocateOffscreenColorStore() : AllocateOffscreenMonoStore()))
+	if (!(gHasColourQD ? AllocateOffscreenColourStore() : AllocateOffscreenMonoStore()))
 		return false;
 	
 	offscreenBounds = imageStart;
@@ -1420,7 +1420,7 @@ static Boolean AllocateOffscreenStore(void) {
    next time the current fractal's default view finishes rendering. */
 static void DisposeOffscreenStore(void) {
     if (offscreenReady) {
-        if (gHasColorQD) {
+        if (gHasColourQD) {
             UnlockPixels(((CGrafPtr) offscreenGWorld)->portPixMap);
             DisposeGWorld(offscreenGWorld);
             offscreenGWorld = NULL;
@@ -1540,12 +1540,12 @@ void GetFractalResolution(short *outWidth, short *outHeight) {
    See mwWindow.h. A deliberate overestimate - rounds generously and
    adds a fixed margin for the GWorld's/BitMap's own small internal
    structures - rather than an exact figure matching
-   AllocateOffscreenColorStore()/AllocateOffscreenMonoStore()'s own
+   AllocateOffscreenColourStore()/AllocateOffscreenMonoStore()'s own
    real sizing. Good enough to decide whether an allocation is likely
    to fail before ever attempting it (see mwZoom.c's TrackWindowResize()),
    not a substitute for those functions' own exact calculations. */
 long EstimateOffscreenBytesNeeded(short width, short height) {
-	if (gHasColorQD) {
+	if (gHasColourQD) {
 		return (long) width * height + 2048L;
 	} else {
 		short	finestSize      = CurrentFinestBlockSize();
@@ -1729,7 +1729,7 @@ static void BeginNextPass(void) {
    colours come out wrong once this is drawing again, that assumption
    is the first thing to revisit. */
 static void EnterOffscreenPort(void) {
-	SetPort(gHasColorQD ? (GrafPtr) offscreenGWorld : &offscreenPort);
+	SetPort(gHasColourQD ? (GrafPtr) offscreenGWorld : &offscreenPort);
 }
 
 static void EnterWindowPort(void) {
@@ -1755,42 +1755,42 @@ Boolean GetOffscreenImage(BitMap **bits, Rect *bounds) {
 	if (!offscreenReady)
 		return false;
 	
-	*bits   = gHasColorQD ? &((GrafPtr) offscreenGWorld)->portBits : &offscreenBits;
+	*bits   = gHasColourQD ? &((GrafPtr) offscreenGWorld)->portBits : &offscreenBits;
 	*bounds = offscreenBounds;
 	return true;
 }
 
-/* GetOffscreenColorTable()
+/* GetOffscreenColourTable()
    Returns the offscreen colour GWorld's own CTabHandle - the actual
-   one it owns internally, not the temporary one BuildFractalColorTable()
+   one it owns internally, not the temporary one BuildFractalColourTable()
    built and NewGWorld() copied from at allocation time (that copy is
-   disposed immediately after, in AllocateOffscreenColorStore()). A
+   disposed immediately after, in AllocateOffscreenColourStore()). A
    PixMap's pmTable field is exactly this: the colour table QuickDraw
    itself consults whenever it needs to interpret that PixMap's index
    bytes as colours - which CopyBits() does on every blit. Rotating
    this table's own RGB entries in place, then blitting the (entirely
    unchanged) pixel data again via RefreshWholeDisplay(), is how
-   mwColorCycle.c's Animate feature shows different colours without
+   mwColourCycle.c's Animate feature shows different colours without
    redrawing a single pixel - real Mac colour-cycling, not a
    recompute-and-redraw pretending to be one. */
-CTabHandle GetOffscreenColorTable(void) {
-	if (!gHasColorQD || !offscreenReady)
+CTabHandle GetOffscreenColourTable(void) {
+	if (!gHasColourQD || !offscreenReady)
 		return NULL;
 	
 	return (**((CGrafPtr) offscreenGWorld)->portPixMap).pmTable;
 }
 
-Boolean IsRenderingInColor(void) {
-	return ShouldRenderInColor();
+Boolean IsRenderingInColour(void) {
+	return ShouldRenderInColour();
 }
 
 /* IsAnimationAvailable()
    See mwWindow.h. width==1 is the Tree - checked directly here since
    it's this file's own global (mwMenus.c externs it), and this is
    exactly the kind of fractal-specific detail that belongs in this
-   file rather than leaking into mwColorCycle.c or mwMenus.c. */
+   file rather than leaking into mwColourCycle.c or mwMenus.c. */
 Boolean IsAnimationAvailable(void) {
-	if (ShouldRenderInColor())
+	if (ShouldRenderInColour())
 		return true;
 	
 	return (gMonoShadeLevels != NULL) && (width != 1);
@@ -1799,7 +1799,7 @@ Boolean IsAnimationAvailable(void) {
 /* RefreshWholeDisplay()
    Blits the whole current offscreen image to the window, exactly like
    an update event's DrawContent() call would, but callable any time -
-   for mwColorCycle.c to show a rotated colour table or a phase-shifted
+   for mwColourCycle.c to show a rotated colour table or a phase-shifted
    pattern redraw without waiting for or forcing an actual update
    event. */
 void RefreshWholeDisplay(void) {
@@ -1899,22 +1899,22 @@ Boolean IsZoomOutAvailable(void) {
 	return (width == 2 || width == 3);
 }
 
-/* RebuildOffscreenColorTableForCurrentPalette()
+/* RebuildOffscreenColourTableForCurrentPalette()
    Overwrites every entry of the offscreen GWorld's own colour table
-   (see GetOffscreenColorTable()) with ColorForShadeLevel()'s output
+   (see GetOffscreenColourTable()) with ColourForShadeLevel()'s output
    under whichever palette is now current - the same computation
-   BuildFractalColorTable() uses to build a table from scratch,
+   BuildFractalColourTable() uses to build a table from scratch,
    applied here to one that already exists, in place, rather than
    allocating a new one. The pixel data (shade-level indices) is
    completely untouched, so a palette change never needs a re-render -
    only a fresh blit (see SetCurrentPalette()) to show the same,
    already-computed indices through their new colours. Mirrors
-   mwColorCycle.c's RotateColorTable() in spirit - direct mutation of
+   mwColourCycle.c's RotateColourTable() in spirit - direct mutation of
    the live colour table, then GetCTSeed() to mark it changed, no
    SetGWorld()/Palette Manager involved, for the same reasons spelled
    out there. */
-static void RebuildOffscreenColorTableForCurrentPalette(void) {
-	CTabHandle	table = GetOffscreenColorTable();
+static void RebuildOffscreenColourTableForCurrentPalette(void) {
+	CTabHandle	table = GetOffscreenColourTable();
 	short		i;
 	
 	if (table == NULL)
@@ -1925,20 +1925,20 @@ static void RebuildOffscreenColorTableForCurrentPalette(void) {
 	   their own comment). table's own ctSize+1 now covers those two
 	   as well, so it isn't used as the loop bound here any more. */
 	for (i = 0; i <= kShadingScale; i++)
-		(**table).ctTable[i].rgb = ColorForShadeLevel(i);
+		(**table).ctTable[i].rgb = ColourForShadeLevel(i);
 	
 	(**table).ctSeed = GetCTSeed();
 }
 
-/* GetRotatableColorTableEntryCount()
+/* GetRotatableColourTableEntryCount()
    See mwWindow.h - how many of the offscreen colour table's entries
-   Animate's own colour-table rotation (mwColorCycle.c's
-   RotateColorTable()) may touch: kShadingScale+1, the palette-driven
+   Animate's own colour-table rotation (mwColourCycle.c's
+   RotateColourTable()) may touch: kShadingScale+1, the palette-driven
    shading range, and never the two fixed background entries beyond
    it (see kBackgroundWhiteIndex/kBackgroundBlackIndex's own comment) -
    rotating those into the shading range would eventually leave a
    flat white or black smeared across part of the ramp. */
-short GetRotatableColorTableEntryCount(void) {
+short GetRotatableColourTableEntryCount(void) {
 	return kShadingScale + 1;
 }
 
@@ -1958,10 +1958,10 @@ short GetCurrentPalette(void) {
 /* IsPaletteAvailable()
    True while palette selection means anything at all. A palette is a
    colour-table concept, meaningless for the monochrome dither-pattern
-   path, so this just mirrors gHasColorQD - mwMenus.c uses this to
+   path, so this just mirrors gHasColourQD - mwMenus.c uses this to
    grey out the Palette submenu on a black-and-white Mac. */
 Boolean IsPaletteAvailable(void) {
-	return gHasColorQD;
+	return gHasColourQD;
 }
 
 /* SetCurrentPalette()
@@ -1981,7 +1981,7 @@ void SetCurrentPalette(short paletteIndex) {
 	
 	currentPalette = paletteIndex;
 	
-	RebuildOffscreenColorTableForCurrentPalette();
+	RebuildOffscreenColourTableForCurrentPalette();
 	RefreshWholeDisplay();
 }
 
@@ -2010,7 +2010,7 @@ Boolean RestoreDefaultViewFromCache(void) {
 	
 	BlockMove(gDefaultViewCachePixels, bits->baseAddr, gDefaultViewCachePixelsSize);
 	
-	if (!gHasColorQD && gMonoShadeLevels != NULL && gDefaultViewCacheShadeLevels != NULL) {
+	if (!gHasColourQD && gMonoShadeLevels != NULL && gDefaultViewCacheShadeLevels != NULL) {
 		long shadeLevelsSize = (long) gMonoShadeLevelColumns * gMonoShadeLevelRows;
 		BlockMove(gDefaultViewCacheShadeLevels, gMonoShadeLevels, shadeLevelsSize);
 	}
@@ -2088,7 +2088,7 @@ void RenderFractalOffscreen(void) {
 	   than the plain white every other fractal erases to - mono has
 	   no palette to contrast against, so it keeps the ordinary erase
 	   unchanged. */
-	if (width == 1 && gHasColorQD)
+	if (width == 1 && gHasColourQD)
 		FillIndexedRect(&offscreenBounds, RecursiveFractalBackgroundIndex());
 	else
 		EraseRect(&offscreenBounds);

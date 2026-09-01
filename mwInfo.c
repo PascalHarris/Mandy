@@ -38,7 +38,7 @@ extern	int	width;	/* which fractal is selected - see mwWindow.c */
    approximation to a "palette" style window available without
    shipping a custom WDEF resource, which a genuinely Finder-Get-Info-
    style thin palette title bar would need. Always a plain NewWindow(),
-   never NewCWindow(), regardless of gHasColorQD: this window only
+   never NewCWindow(), regardless of gHasColourQD: this window only
    ever draws plain black text and one button, so there's nothing here
    that benefits from being a colour window, and one less place to
    carry that complexity. */

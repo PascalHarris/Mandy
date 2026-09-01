@@ -9,14 +9,14 @@
 #include "mwMenus.h"
 #include "mwWindow.h"
 #include "mwInfo.h"
-#include "mwColorCycle.h"
+#include "mwColourCycle.h"
 #include "mwZoom.h"
 #include <GestaltEqu.h>
 
 extern	WindowPtr	mwWindow;
 extern	Rect		dragRect;
 
-Boolean	gHasColorQD;
+Boolean	gHasColourQD;
 
 /* Arrow key character codes - the low byte of a keyDown/autoKey
    event's message field when the key pressed is an arrow key, with no
@@ -26,7 +26,7 @@ Boolean	gHasColorQD;
    relying on a symbolic constant that may or may not be defined in
    this project's (System 6/7-era) headers - the same reasoning
    that's kept this project away from newer, occasionally-unlinked
-   Toolbox calls elsewhere (see mwColorCycle.c). */
+   Toolbox calls elsewhere (see mwColourCycle.c). */
 #define kLeftArrowKeyCode	0x1C
 #define kRightArrowKeyCode	0x1D
 #define kUpArrowKeyCode		0x1E
@@ -35,7 +35,7 @@ Boolean	gHasColorQD;
 void InitMacintosh(void);
 void HandleMouseDown (EventRecord	*theEvent);
 void HandleEvent(void);
-static Boolean HasColorQuickDraw(void);
+static Boolean HasColourQuickDraw(void);
 
 /* InitMacintosh()
    Initialize all the managers & memory */
@@ -51,10 +51,10 @@ void InitMacintosh(void) {
     InitDialogs(0L);
     InitCursor();
     
-    gHasColorQD = HasColorQuickDraw();
+    gHasColourQD = HasColourQuickDraw();
 }
 
-/* HasColorQuickDraw()
+/* HasColourQuickDraw()
    This gates not just RGBForeColor()/PaintRect()/NewCWindow() (which
    only need basic Color QuickDraw, gestalt8BitQD) but also NewGWorld()
    and friends, which are a distinct, later capability - "32-Bit
@@ -74,7 +74,7 @@ void InitMacintosh(void) {
    than the Gestalt check above - accepted here since a real machine
    old enough to lack Gestalt but with a GWorld-capable colour card is
    vanishingly unlikely to exist. */
-static Boolean HasColorQuickDraw(void) {
+static Boolean HasColourQuickDraw(void) {
     long qdVersion;
     
     if (Gestalt(gestaltQuickdrawVersion, &qdVersion) == noErr)

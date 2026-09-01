@@ -110,32 +110,32 @@ FractalParameters GetFractalParameters(void);
    the offscreen store failed to allocate under low memory. */
 Boolean GetOffscreenImage(BitMap **bits, Rect *bounds);
 
-/* Support for the Animate feature (mwColorCycle.c) -------------------
+/* Support for the Animate feature (mwColourCycle.c) -------------------
    Animation rotates the already-rendered image's colours/patterns in
    place rather than recomputing the fractal, so it stays cheap enough
    to run every couple of ticks. These expose just enough of this
-   file's internals for mwColorCycle.c to do that: */
+   file's internals for mwColourCycle.c to do that: */
 
 /* The offscreen colour GWorld's own colour table, for rotating its RGB
    entries directly (bypassing SetGWorld/the Palette Manager - see
-   mwColorCycle.c for why). NULL if there's no colour offscreen store
+   mwColourCycle.c for why). NULL if there's no colour offscreen store
    (no colour QuickDraw, or allocation failed under low memory). */
-CTabHandle GetOffscreenColorTable(void);
+CTabHandle GetOffscreenColourTable(void);
 
-/* How many of the offscreen colour table's entries mwColorCycle.c's
-   RotateColorTable() may rotate - see the function's own comment in
+/* How many of the offscreen colour table's entries mwColourCycle.c's
+   RotateColourTable() may rotate - see the function's own comment in
    mwWindow.c for why this is less than the table's own full size. */
-short GetRotatableColorTableEntryCount(void);
+short GetRotatableColourTableEntryCount(void);
 
-/* True if the current screen depth and gHasColorQD together mean
+/* True if the current screen depth and gHasColourQD together mean
    fractals are actually being rendered in colour right now - i.e.
-   ShouldRenderInColor(), exposed for mwColorCycle.c to decide which
+   ShouldRenderInColour(), exposed for mwColourCycle.c to decide which
    of colour-cycling or pattern-cycling applies. */
-Boolean IsRenderingInColor(void);
+Boolean IsRenderingInColour(void);
 
 /* True if Animate would actually do something useful right now.
    Colour cycling only needs the offscreen colour table to exist, so
-   this always follows IsRenderingInColor() there. Mono pattern-cycling
+   this always follows IsRenderingInColour() there. Mono pattern-cycling
    additionally needs gMonoShadeLevels to have both allocated
    successfully (see AllocateOffscreenMonoStore() - it's larger than
    the mono bitmap itself, so it's the more likely of the two to fail
@@ -146,7 +146,7 @@ Boolean IsRenderingInColor(void);
 Boolean IsAnimationAvailable(void);
 
 /* Blits the whole current offscreen image to the window, exactly as
-   an update event would - for mwColorCycle.c to call after rotating
+   an update event would - for mwColourCycle.c to call after rotating
    colours or patterns, without going through an actual update event. */
 void RefreshWholeDisplay(void);
 

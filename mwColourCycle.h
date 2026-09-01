@@ -1,7 +1,7 @@
 /*****
- * mwColorCycle.h
+ * mwColourCycle.h
  *
- *		Public interface for mwColorCycle.c - the Fractal menu's
+ *		Public interface for mwColourCycle.c - the Fractal menu's
  *		Animate/Stop Animation feature.
  *
  *****/
@@ -22,9 +22,9 @@ Boolean IsAnimationActive(void);
 /* Call once per HandleEvent() idle cycle, alongside AdvanceFractalRender()
    and RefreshInfoWindowIfNeeded(). Does nothing at all, cheaply, unless
    animation is currently running. Internally picks real colour-table
-   rotation (see mwWindow.h's GetOffscreenColorTable()) or the mono
+   rotation (see mwWindow.h's GetOffscreenColourTable()) or the mono
    pattern-phase redraw (see mwWindow.h's ApplyMonoPatternPhase()),
-   according to mwWindow.h's IsRenderingInColor() - the person doesn't
+   according to mwWindow.h's IsRenderingInColour() - the person doesn't
    choose between them, the same "Animate" item does the right thing
    on whatever hardware this happens to be running on. Always runs in
    whichever direction was last set by AnimationArrowKeyPressed(). */
