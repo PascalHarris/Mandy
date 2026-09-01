@@ -404,7 +404,7 @@ static short		SampleJulia(short x, short y);
 static short		ShadeLevelForIterationCount(short iterationCount, short maxIterations);
 static RGBColor		ColorForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
-static CTabHandle	BuildFractalColorTable(short entryCount);
+static CTabHandle	BuildFractalColorTable(void);
 static short		CurrentFinestBlockSize(void);
 static Boolean		ShouldRenderInColor(void);
 static void			ShadeBlock(const Rect *blockRect, short shadeLevel);
@@ -428,6 +428,10 @@ static void			BeginNextPass(void);
 static void			EnterOffscreenPort(void);
 static void			EnterWindowPort(void);
 static void			BlitOffscreenToWindow(const Rect *changedRect);
+static void			DrawBranchDirectly(float x1, float y1, float angle, float depth);
+static void			DrawIndexedLine(short x1, short y1, short x2, short y2, short colorIndex);
+static short		BranchColorIndexForDepth(short depth);
+static short		RecursiveFractalBackgroundIndex(void);
 
 /* SetUpWindow()
    Create the Minimum Window window, and open it - a colour window via
@@ -450,7 +454,58 @@ void SetUpWindow(void) {
     RenderFractalOffscreen();
 }
 
+/* The Tree's fixed recursion depth, passed to the initial DrawBranch()/
+   DrawBranchDirectly() call at both call sites (RenderFractalOffscreen(),
+   DrawFractalDirectly()) - never actually varies, so it's a constant
+   rather than a parameter threaded through the recursion. Also drives
+   BranchColorIndexForDepth()'s base-to-tip colour mapping: depth
+   kTreeInitialDepth is the trunk (drawn first), depth 1 is the last
+   segment actually drawn before the depth-0 base case ends that
+   branch (the closest thing to a "tip" this recursion reaches). */
+#define kTreeInitialDepth	9
+
+/* DrawBranch()
+   Recursively draws the Tree's branches into the offscreen store for
+   the normal render path (RenderFractalOffscreen()) - the low-memory
+   DrawFractalDirectly() fallback, which has no offscreen store to
+   write into, uses DrawBranchDirectly() below instead.
+   
+   In colour, writes each segment via DrawIndexedLine() - a plain
+   pixel-by-pixel write into the offscreen store's own memory - coloured
+   by BranchColorIndexForDepth(), rather than through LineTo()/
+   ForeColor(): QuickDraw's own colour-setting calls are exactly what
+   ShadeBlock()'s own comment (and FillIndexedRect(), which takes the
+   same direct-write approach for rects) already found unreliable on
+   this offscreen GWorld, for the same RGBForeColor()/PmForeColor()
+   reasons documented there. In monochrome, keeps the original
+   MoveTo()/Line() drawing unchanged - there's no palette to colour by
+   in monochrome, so there's nothing this change needs to do there. */
 void DrawBranch(float x1, float y1, float angle, float depth) {
+	if (depth != 0) {
+		float x2 = x1 + cos(angle*(pi/180.0))*depth*10;
+		float y2 = y1 + sin(angle*(pi/180.0))*depth*10;
+		
+		if (gHasColorQD) {
+			short colorIndex = BranchColorIndexForDepth((short) depth);
+			DrawIndexedLine((short) x1, (short) (windowHeight - y1), (short) x2, (short) (windowHeight - y2), colorIndex);
+		} else {
+			MoveTo(x1,windowHeight-y1);
+			Line(x2-x1,y1-y2);
+		}
+		
+		DrawBranch(x2,y2,angle-20,depth-1);
+		DrawBranch(x2,y2,angle+20,depth-1);
+	}
+}
+
+/* DrawBranchDirectly()
+   The Tree's original drawing, unchanged: plain MoveTo()/Line() calls
+   into whatever the current port is. Used only by DrawFractalDirectly()'s
+   low-memory fallback, which draws straight into the window because
+   there's no offscreen store available to hold a palette-indexed
+   image at all - DrawBranch()'s direct-write approach above has
+   nothing to write into in that situation. */
+static void DrawBranchDirectly(float x1, float y1, float angle, float depth) {
 	if (depth != 0) {
 		float x2 = x1 + cos(angle*(pi/180.0))*depth*10;
 		float y2 = y1 + sin(angle*(pi/180.0))*depth*10;
@@ -458,11 +513,9 @@ void DrawBranch(float x1, float y1, float angle, float depth) {
 		MoveTo(x1,windowHeight-y1);
 		Line(x2-x1,y1-y2);
 		
-		DrawBranch(x2,y2,angle-20,depth-1);
-		DrawBranch(x2,y2,angle+20,depth-1);
-	
+		DrawBranchDirectly(x2,y2,angle-20,depth-1);
+		DrawBranchDirectly(x2,y2,angle+20,depth-1);
 	}
-
 }
 
 /* IterateEscapeTime()
@@ -653,6 +706,22 @@ typedef struct {
 	RGBColor	color;
 } ColorRampStop;
 
+/* The offscreen colour table reserves two fixed entries beyond the
+   kShadingScale+1 palette-driven shading range: a genuine white and a
+   genuine black, used only as backgrounds for recursive/direct-draw
+   fractals (currently just the Tree - see RecursiveFractalBackgroundIndex()
+   and DrawBranch()). Neither is ever touched by a palette rebuild
+   (RebuildOffscreenColorTableForCurrentPalette() only ever writes
+   0..kShadingScale) or by Animate's colour-table rotation
+   (mwColorCycle.c's RotateColorTable() only ever rotates that same
+   range, via GetRotatableColorTableEntryCount()) - they stay a true
+   white and true black regardless of which palette is active or how
+   far it's been rotated, which matters for a palette like Night that
+   has no true white or black stop of its own to fall back on. */
+#define kBackgroundWhiteIndex	(kShadingScale + 1)
+#define kBackgroundBlackIndex	(kShadingScale + 2)
+#define kColorTableEntryCount	(kShadingScale + 3)
+
 #define kMaxColorRampStops	7
 
 typedef struct {
@@ -793,16 +862,73 @@ static RGBColor ColorForShadeLevel(short shadeLevel) {
 	return palette->stops[palette->stopCount - 1].color;
 }
 
+/* IsCurrentPaletteDark()
+   Whether the active palette reads as predominantly dark overall -
+   averages a standard perceptual luma weighting (0.30/0.59/0.11,
+   scaled by 100 to stay in integer arithmetic) across all of the
+   palette's own stops, compared against the midpoint of the RGB
+   component range. Used to choose a contrasting background for
+   recursive fractals - see RecursiveFractalBackgroundIndex() - so a
+   palette like Night (all dark stops) gets a light background rather
+   than another dark one on top of it, and a palette like Wintery (all
+   pale stops) gets a dark one. */
+static Boolean IsCurrentPaletteDark(void) {
+	const PaletteDefinition *palette = &kPalettes[currentPalette];
+	long total = 0;
+	short i;
+	
+	for (i = 0; i < palette->stopCount; i++) {
+		RGBColor color = palette->stops[i].color;
+		total += ((long) color.red * 30 + (long) color.green * 59 + (long) color.blue * 11) / 100;
+	}
+	
+	return (total / palette->stopCount) < 32768;
+}
+
+/* RecursiveFractalBackgroundIndex()
+   The background colour index for recursive/direct-draw fractals -
+   currently just the Tree, via RenderFractalOffscreen(). Chosen for
+   contrast against whichever palette is active, rather than a fixed
+   colour: kBackgroundWhiteIndex if the palette reads as predominantly
+   dark overall (IsCurrentPaletteDark()), kBackgroundBlackIndex if it
+   reads as predominantly light. Both are the two fixed,
+   palette-independent entries described in kBackgroundWhiteIndex/
+   kBackgroundBlackIndex's own comment, so this is a genuine white or
+   black background regardless of what colours the active palette
+   itself happens to define. */
+static short RecursiveFractalBackgroundIndex(void) {
+	return IsCurrentPaletteDark() ? kBackgroundWhiteIndex : kBackgroundBlackIndex;
+}
+
+/* BranchColorIndexForDepth()
+   Maps DrawBranch()'s current recursion depth onto a palette index
+   spanning the full shading range: kTreeInitialDepth (the trunk, drawn
+   first) to 0, and depth 1 (the last segment actually drawn before
+   the depth-0 base case ends a branch, the closest this recursion
+   gets to a "tip") to kShadingScale - so Animate's existing
+   colour-table rotation (mwColorCycle.c), completely unchanged,
+   already produces the requested "cycle from base to tip through the
+   palette" effect once branches carry these indices: rotating the
+   table shifts whichever colour was at the trunk toward the tips (or
+   the reverse, depending on rotation direction), with no
+   animation-specific code of its own needed here. */
+static short BranchColorIndexForDepth(short depth) {
+	return (short) (((kTreeInitialDepth - depth) * kShadingScale) / (kTreeInitialDepth - 1));
+}
+
 /* BuildFractalColorTable()
-   Hand-builds a ColorTable of entryCount entries (a Handle sized for
-   ColorTable's trailing variable-length ctTable array), one per
-   possible shadeLevel, so the offscreen GWorld's CLUT is our own
-   fractal ramp rather than the system default. The caller owns the
-   returned handle; NewGWorld() copies what it needs from it rather
-   than keeping it, so it should be disposed (via DisposeCTable())
-   once passed to NewGWorld(). Returns NULL on low memory. */
-static CTabHandle BuildFractalColorTable(short entryCount) {
-	long		tableSize  = sizeof(ColorTable) + (long) (entryCount - 1) * sizeof(ColorSpec);
+   Hand-builds a ColorTable of kColorTableEntryCount entries (a Handle
+   sized for ColorTable's trailing variable-length ctTable array): one
+   per possible shadeLevel (0..kShadingScale), so the offscreen
+   GWorld's CLUT is our own fractal ramp rather than the system
+   default, plus the two fixed white/black background entries - see
+   kBackgroundWhiteIndex/kBackgroundBlackIndex's own comment. The
+   caller owns the returned handle; NewGWorld() copies what it needs
+   from it rather than keeping it, so it should be disposed (via
+   DisposeCTable()) once passed to NewGWorld(). Returns NULL on low
+   memory. */
+static CTabHandle BuildFractalColorTable(void) {
+	long		tableSize  = sizeof(ColorTable) + (long) (kColorTableEntryCount - 1) * sizeof(ColorSpec);
 	CTabHandle	colorTable = (CTabHandle) NewHandle(tableSize);
 	short		i;
 	
@@ -811,12 +937,22 @@ static CTabHandle BuildFractalColorTable(short entryCount) {
 	
 	(**colorTable).ctSeed  = GetCTSeed();
 	(**colorTable).ctFlags = 0;
-	(**colorTable).ctSize  = entryCount - 1;
+	(**colorTable).ctSize  = kColorTableEntryCount - 1;
 	
-	for (i = 0; i < entryCount; i++) {
+	for (i = 0; i <= kShadingScale; i++) {
 		(**colorTable).ctTable[i].value = i;
 		(**colorTable).ctTable[i].rgb   = ColorForShadeLevel(i);
 	}
+	
+	(**colorTable).ctTable[kBackgroundWhiteIndex].value     = kBackgroundWhiteIndex;
+	(**colorTable).ctTable[kBackgroundWhiteIndex].rgb.red   = 65535;
+	(**colorTable).ctTable[kBackgroundWhiteIndex].rgb.green = 65535;
+	(**colorTable).ctTable[kBackgroundWhiteIndex].rgb.blue  = 65535;
+	
+	(**colorTable).ctTable[kBackgroundBlackIndex].value     = kBackgroundBlackIndex;
+	(**colorTable).ctTable[kBackgroundBlackIndex].rgb.red   = 0;
+	(**colorTable).ctTable[kBackgroundBlackIndex].rgb.green = 0;
+	(**colorTable).ctTable[kBackgroundBlackIndex].rgb.blue  = 0;
 	
 	return colorTable;
 }
@@ -1015,6 +1151,45 @@ static void FillIndexedRect(const Rect *blockRect, short shadeLevel) {
 	}
 }
 
+/* DrawIndexedLine()
+   Draws a straight line by writing colorIndex bytes directly into the
+   offscreen store's PixMap memory, pixel by pixel via a plain integer
+   Bresenham walk - the same direct-write technique FillIndexedRect()
+   uses for rects, and for the same reason: QuickDraw's own
+   LineTo()/ForeColor() are what this project has already found
+   unreliable for setting colour on this offscreen GWorld (see
+   ShadeBlock()'s comment). Used by DrawBranch() for the Tree; nothing
+   else in this project draws lines that need colour.
+   
+   Clips to the offscreen bounds itself, one pixel at a time, since a
+   direct memory write isn't automatically clipped by QuickDraw the
+   way LineTo() would be - the Tree's branches can compute endpoints
+   slightly outside the image at the widest angles. */
+static void DrawIndexedLine(short x1, short y1, short x2, short y2, short colorIndex) {
+	PixMapHandle	pixMap   = ((CGrafPtr) offscreenGWorld)->portPixMap;
+	Ptr				baseAddr = (**pixMap).baseAddr;
+	long			rowBytes = (**pixMap).rowBytes & 0x3FFF;
+	short			dx       = (x1 < x2) ? (x2 - x1) : (x1 - x2);
+	short			dy       = (y1 < y2) ? (y2 - y1) : (y1 - y2);
+	short			sx       = (x1 < x2) ? 1 : -1;
+	short			sy       = (y1 < y2) ? 1 : -1;
+	short			err      = dx - dy;
+	
+	for (;;) {
+		if (x1 >= 0 && x1 < windowWidth && y1 >= 0 && y1 < windowHeight)
+			*((unsigned char *) baseAddr + (long) y1 * rowBytes + x1) = (unsigned char) colorIndex;
+		
+		if (x1 == x2 && y1 == y2)
+			break;
+		
+		{
+			short e2 = err * 2;
+			if (e2 > -dy) { err -= dy; x1 += sx; }
+			if (e2 < dx)  { err += dx; y1 += sy; }
+		}
+	}
+}
+
 /* DrawFractalDirectly()
    Draws the whole image into the current port in one pass at full
    resolution, with no progress shown along the way. This is only used
@@ -1031,7 +1206,7 @@ static void DrawFractalDirectly(void) {
 	EraseRect(&imageStart);
 	
 	if (width == 1) {
-		DrawBranch(windowWidth/2, 0, 90, 9);
+		DrawBranchDirectly(windowWidth/2, 0, 90, 9);
 	} else if (width == 2 || width == 3) {
 		FractalSampleProc sampleProc = (width == 2) ? SampleMandelbrot : SampleJulia;
 		short step = CurrentFinestBlockSize();
@@ -1196,7 +1371,7 @@ static Boolean AllocateOffscreenMonoStore(void) {
    Macs never actually run this tight on memory) and locking once is
    one less thing to get wrong at every call site. */
 static Boolean AllocateOffscreenColorStore(void) {
-	CTabHandle	fractalColors = BuildFractalColorTable(kShadingScale + 1);
+	CTabHandle	fractalColors = BuildFractalColorTable();
 	QDErr		error;
 	
 	if (fractalColors == NULL)
@@ -1740,18 +1915,31 @@ Boolean IsZoomOutAvailable(void) {
    out there. */
 static void RebuildOffscreenColorTableForCurrentPalette(void) {
 	CTabHandle	table = GetOffscreenColorTable();
-	short		entryCount;
 	short		i;
 	
 	if (table == NULL)
 		return;
 	
-	entryCount = (**table).ctSize + 1;
-	
-	for (i = 0; i < entryCount; i++)
+	/* Only 0..kShadingScale - never kBackgroundWhiteIndex/kBackgroundBlackIndex,
+	   which stay a fixed white and black regardless of palette (see
+	   their own comment). table's own ctSize+1 now covers those two
+	   as well, so it isn't used as the loop bound here any more. */
+	for (i = 0; i <= kShadingScale; i++)
 		(**table).ctTable[i].rgb = ColorForShadeLevel(i);
 	
 	(**table).ctSeed = GetCTSeed();
+}
+
+/* GetRotatableColorTableEntryCount()
+   See mwWindow.h - how many of the offscreen colour table's entries
+   Animate's own colour-table rotation (mwColorCycle.c's
+   RotateColorTable()) may touch: kShadingScale+1, the palette-driven
+   shading range, and never the two fixed background entries beyond
+   it (see kBackgroundWhiteIndex/kBackgroundBlackIndex's own comment) -
+   rotating those into the shading range would eventually leave a
+   flat white or black smeared across part of the ramp. */
+short GetRotatableColorTableEntryCount(void) {
+	return kShadingScale + 1;
 }
 
 /* GetPaletteCount()
@@ -1894,7 +2082,16 @@ void RenderFractalOffscreen(void) {
     }
     
     EnterOffscreenPort();
-    EraseRect(&offscreenBounds);
+    
+	/* The Tree gets a background chosen for contrast against whatever
+	   palette is active (RecursiveFractalBackgroundIndex()) rather
+	   than the plain white every other fractal erases to - mono has
+	   no palette to contrast against, so it keeps the ordinary erase
+	   unchanged. */
+	if (width == 1 && gHasColorQD)
+		FillIndexedRect(&offscreenBounds, RecursiveFractalBackgroundIndex());
+	else
+		EraseRect(&offscreenBounds);
     
 	if (width == 1) {
 		DrawBranch(windowWidth/2, 0, 90, 9);

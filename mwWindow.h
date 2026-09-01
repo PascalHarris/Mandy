@@ -122,6 +122,11 @@ Boolean GetOffscreenImage(BitMap **bits, Rect *bounds);
    (no colour QuickDraw, or allocation failed under low memory). */
 CTabHandle GetOffscreenColorTable(void);
 
+/* How many of the offscreen colour table's entries mwColorCycle.c's
+   RotateColorTable() may rotate - see the function's own comment in
+   mwWindow.c for why this is less than the table's own full size. */
+short GetRotatableColorTableEntryCount(void);
+
 /* True if the current screen depth and gHasColorQD together mean
    fractals are actually being rendered in colour right now - i.e.
    ShouldRenderInColor(), exposed for mwColorCycle.c to decide which

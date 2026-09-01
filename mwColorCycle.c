@@ -166,7 +166,7 @@ static void AdvanceOneFrame(Boolean forward) {
    fractal colour ramp's own entry count (kShadingScale+1, in
    mwWindow.c) ever changes. */
 static void RotateColorTable(CTabHandle table, Boolean forward) {
-	short		entryCount = (**table).ctSize + 1;
+	short		entryCount = GetRotatableColorTableEntryCount();
 	RGBColor	wrapped;
 	short		i;
 	
