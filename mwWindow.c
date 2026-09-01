@@ -637,24 +637,130 @@ static short ShadeLevelForIterationCount(short iterationCount, short maxIteratio
 }
 
 /* The colour ramp shadeLevel is mapped onto, in the same direction as
-   the monochrome buckets below: 0 (fast escape) is light,
-   kShadingScale (slow escape, or never) is dark. The specific stops -
-   white through yellow/orange/red-purple to black - are an arbitrary
-   starting aesthetic, easy to change; they're also exactly what a
-   future palette-cycling animation would rewrite. */
+   the monochrome buckets below: 0 (fast escape) is light or dark
+   depending on the palette's own aesthetic, kShadingScale (slow
+   escape, or never) is the palette's other extreme. Each palette is
+   its own list of colour stops, interpolated the same way regardless
+   of how many stops it has - a palette with 3 stops (Grayscale) and
+   one with 7 (Rainbow) are handled identically by ColorForShadeLevel().
+   
+   Order in kPalettes[] must match the Palette submenu's AppendMenu()
+   string in mwMenus.c exactly - GetCurrentPalette()/SetCurrentPalette()
+   work in terms of this array's 0-based index, which the (1-based)
+   menu item number maps onto directly. */
 typedef struct {
 	short		shadeLevel;
 	RGBColor	color;
 } ColorRampStop;
 
-static const ColorRampStop kColorRamp[] = {
-	{ 0,                        { 65535, 65535, 65535 } },	/* white  */
-	{ kShadingScale / 4,        { 65535, 65535, 0     } },	/* yellow */
-	{ kShadingScale / 2,        { 65535, 16384, 0     } },	/* orange */
-	{ (kShadingScale * 3) / 4,  { 32768, 0,     16384 } },	/* red-purple */
-	{ kShadingScale,            { 0,     0,     0     } }	/* black  */
+#define kMaxColorRampStops	7
+
+typedef struct {
+	short			stopCount;
+	ColorRampStop	stops[kMaxColorRampStops];
+} PaletteDefinition;
+
+static const PaletteDefinition kPalettes[] = {
+	/* Default - white through yellow/orange/red-purple to black; the
+	   original ramp, unchanged from before palettes existed. */
+	{ 5, {
+		{ 0,                       { 65535, 65535, 65535 } },
+		{ kShadingScale / 4,       { 65535, 65535, 0     } },
+		{ kShadingScale / 2,       { 65535, 16384, 0     } },
+		{ (kShadingScale * 3) / 4, { 32768, 0,     16384 } },
+		{ kShadingScale,           { 0,     0,     0     } }
+	}},
+	/* Night - dark navy through indigo and deep purple to near-black. */
+	{ 4, {
+		{ 0,                       { 0,     0,     16384 } },
+		{ kShadingScale / 3,       { 8192,  0,     32768 } },
+		{ (kShadingScale * 2) / 3, { 24576, 0,     40960 } },
+		{ kShadingScale,           { 4096,  0,     8192  } }
+	}},
+	/* Stormy - pale grey through slate grey and charcoal to near-black,
+	   a cool undertone throughout. */
+	{ 4, {
+		{ 0,                       { 49152, 49152, 53248 } },
+		{ kShadingScale / 3,       { 28672, 28672, 32768 } },
+		{ (kShadingScale * 2) / 3, { 12288, 12288, 16384 } },
+		{ kShadingScale,           { 2048,  2048,  4096  } }
+	}},
+	/* Summery - white through bright yellow and sky blue to grass
+	   green. */
+	{ 4, {
+		{ 0,                       { 65535, 65535, 65535 } },
+		{ kShadingScale / 3,       { 65535, 65535, 16384 } },
+		{ (kShadingScale * 2) / 3, { 16384, 49152, 65535 } },
+		{ kShadingScale,           { 8192,  49152, 8192  } }
+	}},
+	/* Autumnal - pale gold through orange and rust red to deep brown. */
+	{ 4, {
+		{ 0,                       { 65535, 57344, 32768 } },
+		{ kShadingScale / 3,       { 65535, 32768, 8192  } },
+		{ (kShadingScale * 2) / 3, { 49152, 16384, 4096  } },
+		{ kShadingScale,           { 24576, 8192,  4096  } }
+	}},
+	/* Wintery - white through pale ice blue and pale grey to soft
+	   blue-grey. */
+	{ 4, {
+		{ 0,                       { 65535, 65535, 65535 } },
+		{ kShadingScale / 3,       { 53248, 60416, 65535 } },
+		{ (kShadingScale * 2) / 3, { 45056, 45056, 49152 } },
+		{ kShadingScale,           { 28672, 32768, 40960 } }
+	}},
+	/* Pastel - soft pink, lavender, mint, pale yellow, soft peach - all
+	   high-lightness, low-saturation. */
+	{ 5, {
+		{ 0,                       { 65535, 53248, 57344 } },
+		{ kShadingScale / 4,       { 53248, 49152, 65535 } },
+		{ kShadingScale / 2,       { 49152, 65535, 57344 } },
+		{ (kShadingScale * 3) / 4, { 65535, 65535, 49152 } },
+		{ kShadingScale,           { 65535, 57344, 49152 } }
+	}},
+	/* Rainbow - a full hue sweep: red, orange, yellow, green, blue,
+	   indigo, violet. */
+	{ 7, {
+		{ 0,                       { 65535, 0,     0     } },
+		{ (kShadingScale * 1) / 6, { 65535, 32768, 0     } },
+		{ (kShadingScale * 2) / 6, { 65535, 65535, 0     } },
+		{ (kShadingScale * 3) / 6, { 0,     65535, 0     } },
+		{ (kShadingScale * 4) / 6, { 0,     0,     65535 } },
+		{ (kShadingScale * 5) / 6, { 24576, 0,     65535 } },
+		{ kShadingScale,           { 40960, 0,     65535 } }
+	}},
+	/* Fire (suggested) - white through bright yellow and orange to
+	   deep red then black - hotter and more saturated than Default. */
+	{ 5, {
+		{ 0,                       { 65535, 65535, 65535 } },
+		{ kShadingScale / 4,       { 65535, 65535, 8192  } },
+		{ kShadingScale / 2,       { 65535, 24576, 0     } },
+		{ (kShadingScale * 3) / 4, { 49152, 0,     0     } },
+		{ kShadingScale,           { 0,     0,     0     } }
+	}},
+	/* Ocean (suggested) - white through cyan and teal to deep navy. */
+	{ 4, {
+		{ 0,                       { 65535, 65535, 65535 } },
+		{ kShadingScale / 3,       { 16384, 57344, 65535 } },
+		{ (kShadingScale * 2) / 3, { 0,     32768, 40960 } },
+		{ kShadingScale,           { 0,     4096,  16384 } }
+	}},
+	/* Grayscale (suggested) - pure white through mid grey to black, no
+	   hue at all - a plain baseline, and cheap to reason about when
+	   debugging shading itself independent of any palette's own
+	   colour choices. */
+	{ 3, {
+		{ 0,                       { 65535, 65535, 65535 } },
+		{ kShadingScale / 2,       { 32768, 32768, 32768 } },
+		{ kShadingScale,           { 0,     0,     0     } }
+	}}
 };
-#define kColorRampStopCount 5
+
+#define kPaletteCount ((short) (sizeof(kPalettes) / sizeof(kPalettes[0])))
+
+/* Persists across fractal switches (not reset by
+   ResetViewForCurrentFractal()) and across renders - a palette choice
+   is a display preference, not part of any one fractal's own state. */
+static short currentPalette = 0;
 
 /* InterpolateComponent()
    Linear blend of one RGBColor component between two ramp stops. */
@@ -663,26 +769,28 @@ static unsigned short InterpolateComponent(unsigned short from, unsigned short t
 }
 
 /* ColorForShadeLevel()
-   Finds the pair of ramp stops shadeLevel falls between and linearly
-   blends their colours. */
+   Finds the pair of the current palette's ramp stops shadeLevel falls
+   between and linearly blends their colours - identical logic
+   regardless of which palette is selected or how many stops it has. */
 static RGBColor ColorForShadeLevel(short shadeLevel) {
+	const PaletteDefinition *palette = &kPalettes[currentPalette];
 	short i;
 	
-	for (i = 1; i < kColorRampStopCount; i++) {
-		if (shadeLevel <= kColorRamp[i].shadeLevel) {
-			short  rangeStart = kColorRamp[i-1].shadeLevel;
-			short  rangeEnd   = kColorRamp[i].shadeLevel;
+	for (i = 1; i < palette->stopCount; i++) {
+		if (shadeLevel <= palette->stops[i].shadeLevel) {
+			short  rangeStart = palette->stops[i-1].shadeLevel;
+			short  rangeEnd   = palette->stops[i].shadeLevel;
 			double fraction   = (rangeEnd > rangeStart) ? (double) (shadeLevel - rangeStart) / (rangeEnd - rangeStart) : 0.0;
 			RGBColor result;
 			
-			result.red   = InterpolateComponent(kColorRamp[i-1].color.red,   kColorRamp[i].color.red,   fraction);
-			result.green = InterpolateComponent(kColorRamp[i-1].color.green, kColorRamp[i].color.green, fraction);
-			result.blue  = InterpolateComponent(kColorRamp[i-1].color.blue,  kColorRamp[i].color.blue,  fraction);
+			result.red   = InterpolateComponent(palette->stops[i-1].color.red,   palette->stops[i].color.red,   fraction);
+			result.green = InterpolateComponent(palette->stops[i-1].color.green, palette->stops[i].color.green, fraction);
+			result.blue  = InterpolateComponent(palette->stops[i-1].color.blue,  palette->stops[i].color.blue,  fraction);
 			return result;
 		}
 	}
 	
-	return kColorRamp[kColorRampStopCount - 1].color;
+	return palette->stops[palette->stopCount - 1].color;
 }
 
 /* BuildFractalColorTable()
@@ -1614,6 +1722,79 @@ void EnsureWindowVisible(void) {
    it rather than have it do nothing when clicked. */
 Boolean IsZoomOutAvailable(void) {
 	return (width == 2 || width == 3);
+}
+
+/* RebuildOffscreenColorTableForCurrentPalette()
+   Overwrites every entry of the offscreen GWorld's own colour table
+   (see GetOffscreenColorTable()) with ColorForShadeLevel()'s output
+   under whichever palette is now current - the same computation
+   BuildFractalColorTable() uses to build a table from scratch,
+   applied here to one that already exists, in place, rather than
+   allocating a new one. The pixel data (shade-level indices) is
+   completely untouched, so a palette change never needs a re-render -
+   only a fresh blit (see SetCurrentPalette()) to show the same,
+   already-computed indices through their new colours. Mirrors
+   mwColorCycle.c's RotateColorTable() in spirit - direct mutation of
+   the live colour table, then GetCTSeed() to mark it changed, no
+   SetGWorld()/Palette Manager involved, for the same reasons spelled
+   out there. */
+static void RebuildOffscreenColorTableForCurrentPalette(void) {
+	CTabHandle	table = GetOffscreenColorTable();
+	short		entryCount;
+	short		i;
+	
+	if (table == NULL)
+		return;
+	
+	entryCount = (**table).ctSize + 1;
+	
+	for (i = 0; i < entryCount; i++)
+		(**table).ctTable[i].rgb = ColorForShadeLevel(i);
+	
+	(**table).ctSeed = GetCTSeed();
+}
+
+/* GetPaletteCount()
+   How many palettes exist - GetCurrentPalette()/SetCurrentPalette()
+   work in terms of a 0-based index below this. */
+short GetPaletteCount(void) {
+	return kPaletteCount;
+}
+
+/* GetCurrentPalette()
+   The currently active palette's 0-based index into kPalettes[]. */
+short GetCurrentPalette(void) {
+	return currentPalette;
+}
+
+/* IsPaletteAvailable()
+   True while palette selection means anything at all. A palette is a
+   colour-table concept, meaningless for the monochrome dither-pattern
+   path, so this just mirrors gHasColorQD - mwMenus.c uses this to
+   grey out the Palette submenu on a black-and-white Mac. */
+Boolean IsPaletteAvailable(void) {
+	return gHasColorQD;
+}
+
+/* SetCurrentPalette()
+   See mwWindow.h. Deliberately doesn't check IsRenderActive(): unlike
+   RestoreDefaultViewFromCache(), this never touches the offscreen
+   store's pixel data, only the colour table's RGB entries, so there's
+   no actual race with an in-progress render to guard against - safe
+   to call at any time, including from a future fractal-data loader
+   (see next-improvements.md) that might want to set the palette
+   before triggering a fresh render. mwMenus.c still greys out the
+   menu item during a render anyway, for consistency with how
+   Animate/Zoom Out/Save As behave, even though this specific
+   operation wouldn't actually be unsafe mid-render. */
+void SetCurrentPalette(short paletteIndex) {
+	if (paletteIndex < 0 || paletteIndex >= kPaletteCount)
+		return;
+	
+	currentPalette = paletteIndex;
+	
+	RebuildOffscreenColorTableForCurrentPalette();
+	RefreshWholeDisplay();
 }
 
 /* RestoreDefaultViewFromCache()

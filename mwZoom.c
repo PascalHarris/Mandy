@@ -473,6 +473,20 @@ static Boolean ShowConfirmationDialog(short dialogID, const unsigned char *affir
 		return false;
 	}
 	
+	/* Forces the dialog invisible before repositioning it, regardless
+	   of the DLOG resource's own "initially visible" flag - the first
+	   dialog built had that flag unchecked (see CenterDialogOverMainWindow()'s
+	   caller below forcing it back on), but real testing found a
+	   white hole punched in mwWindow's own top-left corner, matching
+	   the dialog's size, that persisted until the dialog closed -
+	   consistent with the dialog briefly existing, visible, at its
+	   original resource position (close to mwWindow's own top-left)
+	   before CenterDialogOverMainWindow() moves it, and mwWindow's
+	   own update for the area that briefly covered never getting
+	   processed while ModalDialog()'s own event loop has control.
+	   Hiding first, moving, then showing again makes this safe
+	   regardless of what either DLOG resource's flag actually says. */
+	HideWindow(dialog);
 	CenterDialogOverMainWindow(dialog);
 	
 	ShowWindow(dialog);

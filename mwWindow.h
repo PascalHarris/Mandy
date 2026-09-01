@@ -179,6 +179,32 @@ void EnsureWindowVisible(void);
    grey out Zoom Out rather than have it do nothing when clicked. */
 Boolean IsZoomOutAvailable(void);
 
+/* Support for the Palette submenu (mwMenus.c) ------------------------
+   A palette only changes what colours the offscreen store's existing
+   shade-level indices map to - never the indices themselves - so
+   switching palettes is always instant, with no re-render, the same
+   way one step of Animate's colour-table rotation is. */
+
+/* How many palettes exist - GetCurrentPalette()/SetCurrentPalette()
+   work in terms of a 0-based index below this. */
+short GetPaletteCount(void);
+
+/* The currently active palette's 0-based index. */
+short GetCurrentPalette(void);
+
+/* True while palette selection means anything at all - false on a
+   black-and-white Mac, where there's no colour table for a palette to
+   describe. mwMenus.c uses this to grey out (or omit) the Palette
+   submenu accordingly. */
+Boolean IsPaletteAvailable(void);
+
+/* Selects a new palette (a no-op if paletteIndex is out of range) and
+   immediately recolours the current image with it - rebuilds the
+   offscreen colour table's RGB entries for paletteIndex, then blits
+   again. Safe to call at any time, including mid-render, since it
+   never touches the offscreen store's pixel data. */
+void SetCurrentPalette(short paletteIndex);
+
 /* Restores the offscreen image (and, for mono, the shade-level buffer
    Animate reads from) from an internally-cached copy of the current
    fractal's default view, if one exists and matches the offscreen
