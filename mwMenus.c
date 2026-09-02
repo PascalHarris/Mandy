@@ -3,6 +3,36 @@
  *
  *	Routines for Mandy Fractal Generator menus.
  *
+ *	REQUIRES two more resources beyond what mwZoom.c already
+ *	documents (the Zoom Confirmation/Insufficient Memory DLOG/DITL
+ *	pairs at 128/129) - both for the About box:
+ *
+ *	  A DLOG/DITL pair at ID 130 ("About Mandy"). As actually built:
+ *
+ *	    DITL 130, three items in this order:
+ *	      1. A Picture item, sized to exactly 120x60 px. ResEdit can
+ *	         set this item's bounds but can't embed a specific PICT
+ *	         into it directly - ShowAboutBox() attaches the actual
+ *	         picture (GetPicture()/SetDItem()) at runtime, from the
+ *	         PICT resource below.
+ *	      2. A StaticText item reading "\xa9 2015 - 2026 45RPMSoftware"
+ *	         (\xa9 is the copyright symbol, Option-G on a Mac keyboard)
+ *	         - ShowAboutBox() sets 9pt Geneva on it at runtime, since a
+ *	         DITL's own StaticText item has no way to specify a font or
+ *	         size itself.
+ *	      3. A Button, "OK".
+ *
+ *	    Same DLOG conventions as the existing dialogs (see mwZoom.c's
+ *	    own top-of-file comment): procID dBoxProc, goAway off,
+ *	    "initially visible" doesn't matter since the code forces it
+ *	    either way.
+ *
+ *	  A PICT resource at ID 130, exactly 120x60 px - the actual image
+ *	  (logo, artwork, whatever) the About box's picture item shows.
+ *	  This one has to be created by hand (drawn or imported into
+ *	  ResEdit's PICT editor) - it's image content, not something
+ *	  derivable from this codebase.
+ *
  *****/
 
 #include "mwMenus.h"
@@ -10,6 +40,7 @@
 #include "mwInfo.h"
 #include "mwSaveAs.h"
 #include "mwColourCycle.h"
+#include "mwZoom.h"
 #ifndef _Memory_
 #include <Memory.h>
 #endif
@@ -26,6 +57,23 @@ enum {
     editID,
     fractalID
 };
+
+/* The Apple menu's own first item, above the divider that separates
+   it from the desk accessory list AddResMenu() appends in SetUpMenus() -
+   see the standard "About <AppName>..." convention. Any other item
+   clicked in this menu (i.e. anything past the divider) is a desk
+   accessory name, handled as HandleMenu()'s appleID case always has. */
+#define kAboutItem	1
+
+/* About box resources - see the requirement documented at the top of
+   this file. */
+#define kAboutBoxDialogID	130
+#define kAboutBoxPictureID	130
+#define kAboutPictureItem	1
+#define kAboutTextItem		2
+#define kAboutOKItem		3
+
+static void				ShowAboutBox(void);
 
 /* The Palette submenu is its own MenuHandle, with its own menu ID,
    installed into the submenu portion of the menu list (InsertMenu()
@@ -77,6 +125,7 @@ void SetUpMenus(void) {
     InsertMenu(editMenu = NewMenu(editID, "\pEdit"), 0);
    	InsertMenu(fractalMenu = NewMenu(fractalID, "\pFractal"), 0);
     DrawMenuBar();
+    AppendMenu(appleMenu, "\pAbout Mandy 2;(-");
     AddResMenu(appleMenu, 'DRVR');
     AppendMenu(fileMenu, "\pNew Fractal/N;Open/O;Close/W;(-;Get Info/I;Save as PICT...;Save as Fractal Data...;(-;Quit/Q");
     AppendMenu(editMenu, "\pUndo/Z;(-;Cut/X;Copy/C;Paste/V;Clear");
@@ -276,10 +325,14 @@ void HandleMenu (long mSelect) {
     
     switch (menuID) {
         case appleID:
-            GetPort(&savePort);
-            GetItem(appleMenu, menuItem, name);
-            OpenDeskAcc(name);
-            SetPort(savePort);
+            if (menuItem == kAboutItem) {
+                ShowAboutBox();
+            } else {
+                GetPort(&savePort);
+                GetItem(appleMenu, menuItem, name);
+                OpenDeskAcc(name);
+                SetPort(savePort);
+            }
             break;
             
         case fileID:
@@ -359,4 +412,112 @@ void HandleMenu (long mSelect) {
             CheckItem(paletteMenu, menuItem, true);
             break;
     }
+}
+
+/* ShowAboutBox()
+   "About Mandy 2" (HandleMenu()'s appleID case) - see the resource
+   requirement documented at the top of this file (DLOG/DITL/PICT all
+   at ID 130). Attaches the PICT to the picture item and sets 9pt
+   Geneva on the text item at runtime, since neither is something a
+   DITL resource can express on its own. Draws the standard
+   thick-rounded-rect outline around the OK button by hand, the same
+   way any dialog with a default button needs to (the Dialog Manager
+   doesn't draw this itself for a plain button item) - visual only,
+   answering to a mouse click on it exactly like any other button,
+   not to Return/Enter. A real filter proc making the keyboard actually
+   trigger it was tried and removed: ModalFilterProcPtr callbacks need
+   Pascal calling convention, which Think C's `pascal` keyword only
+   applies with Language Extensions enabled (Edit/Options/Language
+   Settings) - real testing crashed on exactly this, consistent with
+   that setting being off in this project and the filter proc's actual
+   calling convention silently not matching what ModalDialog() expects
+   when it calls back into it. Passing NULL instead sidesteps the
+   question entirely, matching every other dialog in this project.
+   
+   Otherwise follows ShowConfirmationDialog()'s established pattern
+   (mwZoom.c): the resource-existence check, hiding before
+   CentreDialogOverMainWindow() repositions it, and forcing it visible
+   regardless of the DLOG's own "initially visible" flag. A single-
+   button dialog doesn't need that function's "find the button by its
+   title text" logic, since there's only one button to wait for, so
+   this is its own, simpler function rather than a third call to it. */
+static void ShowAboutBox(void) {
+	DialogPtr	dialog;
+	Handle		dlogResource;
+	PicHandle	picture;
+	short		itemType;
+	Handle		itemHandle;
+	Rect		itemRect;
+	Rect		buttonRect;
+	short		buttonItem = 0;
+	short		fontID;
+	short		itemHit;
+	GrafPtr		savedPort;
+	short		i;
+	
+	GetPort(&savedPort);
+	
+	dlogResource = GetResource('DLOG', kAboutBoxDialogID);
+	if (dlogResource == NULL || ResError() != noErr) {
+		SysBeep(1);
+		return;
+	}
+	
+	dialog = GetNewDialog(kAboutBoxDialogID, NULL, (WindowPtr) -1L);
+	if (dialog == NULL) {
+		SysBeep(1);
+		return;
+	}
+	
+	HideWindow(dialog);
+	
+	picture = GetPicture(kAboutBoxPictureID);
+	if (picture != NULL) {
+		GetDItem(dialog, kAboutPictureItem, &itemType, &itemHandle, &itemRect);
+		SetDItem(dialog, kAboutPictureItem, itemType, (Handle) picture, &itemRect);
+	}
+	
+	SetPort(dialog);
+	GetFNum("\pGeneva", &fontID);
+	TextFont(fontID);
+	TextSize(9);
+	
+	/* Finds the dialog's one button by its actual DITL item type (4 =
+	   ctrlItem, masking off the 128 = itemDisable bit static text and
+	   the picture item both carry) rather than assuming a fixed item
+	   number - the Zoom Confirmation dialog earlier in this project
+	   already found ResEdit's own item ordering doesn't reliably match
+	   what's specified when a DITL is actually built, so this doesn't
+	   number turns out to be (kAboutOKItem, above, documents the
+	   layout as specified - item 3 - but the code below doesn't
+	   actually trust it). Falls back to accepting the first click
+	   on anything if no control item is found at all (shouldn't
+	   happen, but a dialog with no way to dismiss it at all would be
+	   worse than accepting an unexpected click). */
+	for (i = 1; i <= 3; i++) {
+		GetDItem(dialog, i, &itemType, &itemHandle, &itemRect);
+		if ((itemType & 0x7F) == 4) {
+			buttonItem = i;
+			buttonRect = itemRect;
+		}
+	}
+	
+	CentreDialogOverMainWindow(dialog);
+	
+	ShowWindow(dialog);
+	SelectWindow(dialog);
+	
+	if (buttonItem != 0) {
+		InsetRect(&buttonRect, -4, -4);
+		PenSize(3, 3);
+		FrameRoundRect(&buttonRect, 16, 16);
+		PenSize(1, 1);
+	}
+	
+	do {
+		ModalDialog(NULL, &itemHit);
+	} while (buttonItem != 0 && itemHit != buttonItem);
+	
+	DisposeDialog(dialog);
+	SetPort(savedPort);
 }
