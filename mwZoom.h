@@ -7,6 +7,9 @@
  *		own shape.
  *
  *****/
+#ifndef _Dialogs_
+#include <Dialogs.h>
+#endif
 
 /* Tracks a rubber-band marquee selection starting from
    globalMouseDownPoint (in global coordinates, exactly as delivered
@@ -41,6 +44,15 @@ void TrackWindowResize(Point globalMouseDownPoint);
 /* Called on a '+' (zoom in, halving the visible span on each axis,
    centred on the current view's own centre) or '-' (zoom out,
    doubling it) key press - see MandyWindow.c's HandleEvent(). Does
-   nothing for the Tree (no zoomable view to adjust), or while a
-   render is in progress. */
+   nothing for the Tree (no zoomable view to adjust) or before
+   anything's ever been rendered - safe to call during an active
+   render, which simply restarts it at the new view (see
+   RenderFractalOffscreen()'s own comment on why). */
 void KeyboardZoom(Boolean zoomIn);
+
+/* Repositions dialog to sit centred on mwWindow (or the whole screen
+   mwWindow is on, if centring on the window itself wouldn't work
+   cleanly) - called before the dialog is shown, so there's no visible
+   jump. Used by this file's own confirmation dialogs and by
+   mwMenus.c's About box. */
+void CentreDialogOverMainWindow(DialogPtr dialog);

@@ -62,6 +62,29 @@ static short windowHeight = 300;
 #define kBlockGridTargetColumns	4
 #define kBlocksPerIdleSlice		32
 
+/* kBlitIntervalTicks: AdvanceFractalRender() used to call
+   BlitOffscreenToWindow() after every single kBlocksPerIdleSlice
+   batch - once per call, no exceptions. Real testing found an
+   optimisation that should clearly have helped (skipping iteration
+   entirely for the Mandelbrot set's main cardioid and period-2 bulb -
+   see IsInMainCardioidOrBulb()) produced no visible speed difference
+   at all. kBlocksPerIdleSlice's own comment above already shows fixed
+   per-tick overhead isn't the bottleneck (raising it from 4 to 16 was
+   a large part of an earlier ~4x win) - but CopyBits() itself scales
+   with the *area* it copies, not a fixed per-call cost, and
+   MapIndexToQuadrantOrder() scatters kBlocksPerIdleSlice blocks across
+   the image by design, so their bounding rect - what
+   BlitOffscreenToWindow() actually copies - can span most or all of
+   the image even when only a small fraction of it changed in that
+   batch. Throttling how often the blit actually happens, while still
+   sampling at full speed underneath, targets that directly: 6 ticks
+   (a tenth of a second) still looks smoothly progressive, but cuts
+   the number of CopyBits() calls roughly sixfold for a render that
+   would otherwise blit on every batch. AbortFractalRender()/a
+   finished render still force one final blit regardless, so nothing
+   ever finishes short of what it actually computed. */
+#define kBlitIntervalTicks		6
+
 /* Escape-time fractal parameters. kShadingScale is the common range
    both SampleMandelbrot() and SampleJulia() report on, so ShadeBlock()
    can use one fixed set of thresholds (monochrome) or one fixed colour
@@ -407,12 +430,26 @@ static struct {
 	unsigned long		endTick;
 } fractalRenderJob;
 
+/* Blit throttling state - see kBlitIntervalTicks' own comment.
+   Accumulates across possibly several AdvanceFractalRender() calls
+   until it's actually time to blit, rather than growing and shrinking
+   within a single call the way the job's own per-call changedRect
+   does. Reset (haveAccumulatedChanges cleared) whenever a render
+   starts - see BeginRendering() - since a fresh render's own initial
+   erase already invalidates any region a previous, now-superseded
+   render might have left pending. */
+static Rect		accumulatedChangedRect;
+static Boolean	haveAccumulatedChanges = false;
+static unsigned long lastBlitTick = 0;
+
 static void			BeginRendering(void);
 static void			EndRendering(void);
 static short		IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short maxIterations);
 static short		SampleMandelbrot(short x, short y);
+static Boolean		IsInMainCardioidOrBulb(double cRe, double cIm);
 static short		SampleJulia(short x, short y);
 static short		ShadeLevelForIterationCount(short iterationCount, short maxIterations);
+static void			EnsureLogTableReady(void);
 static RGBColor		ColourForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
 static CTabHandle	BuildFractalColourTable(void);
@@ -640,6 +677,47 @@ static short IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short
    had genuinely escaped at that count against the real scale - an
    approximation for the preview, but the same approximation every
    time, rather than one that shifts as the ceiling grows. */
+
+/* IsInMainCardioidOrBulb()
+   Closed-form check for the Mandelbrot set's two largest interior
+   regions - the main cardioid and the period-2 bulb tangent to it -
+   so SampleMandelbrot() can skip IterateEscapeTime() entirely for
+   points already known to never escape, rather than iterating them
+   all the way to whatever the current ceiling is. Together these two
+   regions cover most of the set's own interior area, and any view
+   that includes much of the traditional "whole set" framing - the
+   default view among them - spends a large fraction of its pixels
+   here, so this is worth checking before falling back to iteration,
+   not after.
+   
+   Cheaper than periodicity checking (IterateEscapeTime()'s own
+   doubling-interval cycle detection) for exactly these two regions
+   specifically: periodicity checking still has to run a real
+   iteration sequence until a cycle is actually detected, where this
+   is a handful of multiplications and comparisons with no iteration
+   at all. It doesn't replace periodicity checking generally - only
+   these two regions have simple closed-form tests; the infinitely
+   many smaller bulbs tangent to the cardioid don't, and still rely on
+   it (see IterateEscapeTime()'s own comment).
+   
+   Formulas: a point c = cRe + cIm*i lies in the main cardioid if
+   q*(q + (cRe - 0.25)) <= 0.25*cIm² where q = (cRe - 0.25)² + cIm²;
+   and in the period-2 bulb if (cRe + 1)² + cIm² <= 0.0625 (a circle
+   of radius 1/4 centred at -1). Both are standard, independently
+   documented results (e.g. Wikipedia's own Mandelbrot set article,
+   which lists this exact optimisation) - not derived here. */
+static Boolean IsInMainCardioidOrBulb(double cRe, double cIm) {
+	double q = (cRe - 0.25) * (cRe - 0.25) + cIm * cIm;
+	
+	if (q * (q + (cRe - 0.25)) <= 0.25 * cIm * cIm)
+		return true;
+	
+	if ((cRe + 1.0) * (cRe + 1.0) + cIm * cIm <= 0.0625)
+		return true;
+	
+	return false;
+}
+
 static short SampleMandelbrot(short x, short y) {
 	double	dRe, dIm;
 	short	iterationCount;
@@ -657,7 +735,11 @@ static short SampleMandelbrot(short x, short y) {
 		MapPixelToComplexPlane(x, y, &dRe, &dIm);
 	}
 	
-	iterationCount = IterateEscapeTime(0.0f, 0.0f, (float) dRe, (float) dIm, currentIterationCeiling);
+	if (IsInMainCardioidOrBulb(dRe, dIm)) {
+		iterationCount = currentIterationCeiling;
+	} else {
+		iterationCount = IterateEscapeTime(0.0f, 0.0f, (float) dRe, (float) dIm, currentIterationCeiling);
+	}
 	
 	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
 }
@@ -691,8 +773,52 @@ static short SampleJulia(short x, short y) {
    against its own maxIterations, rather than being rescaled onto
    another fractal's scale first, so this one function replaces both
    the old direct (Mandelbrot) and rescaled (Julia) linear mappings. */
+/* kLogPlusOneTable[]/EnsureLogTableReady()
+   ShadeLevelForIterationCount()'s log-scale formula needs log(n+1)
+   for two different n each call: iterationCount (0..maxIterations,
+   genuinely different every call - this is what makes the curve a
+   curve) and maxIterations itself (always one of exactly two values
+   in this whole codebase - kMandelbrotMaxIterations or
+   kJuliaMaxIterations - recomputing the *same* result every single
+   call). log() is a transcendental function; on hardware with no FPU
+   (this project's stated minimum, a Mac Plus) it runs through SANE's
+   software floating-point library, meaningfully slower per call than
+   + / - / * / / - and unlike the escape-time optimisations elsewhere here,
+   this call runs for every single sample regardless of what's being
+   viewed, since every pixel needs a shade level whether it escaped
+   in 2 iterations or 2000.
+   
+   Precomputing log(i+1) for every i this codebase could ever ask for
+   - 0 through kJuliaMaxIterations, the larger of the two ceilings -
+   turns both of ShadeLevelForIterationCount()'s log() calls into
+   plain array reads. float, not double: the result only ever feeds a
+   0..kShadingScale shade level, so float's precision is already far
+   more than enough, and it halves the table's size for no loss that
+   matters here. Built once, lazily, on first use - log() itself
+   never needs to run again after that for the rest of the run. */
+#define kLogTableSize	(kJuliaMaxIterations + 1)
+
+static float	kLogPlusOneTable[kLogTableSize];
+static Boolean	gLogTableReady = false;
+
+static void EnsureLogTableReady(void) {
+	short i;
+	
+	if (gLogTableReady)
+		return;
+	
+	for (i = 0; i < kLogTableSize; i++)
+		kLogPlusOneTable[i] = (float) log((double) i + 1.0);
+	
+	gLogTableReady = true;
+}
+
 static short ShadeLevelForIterationCount(short iterationCount, short maxIterations) {
-	double shadeLevel = kShadingScale * log((double) iterationCount + 1.0) / log((double) maxIterations + 1.0);
+	double shadeLevel;
+	
+	EnsureLogTableReady();
+	
+	shadeLevel = kShadingScale * (double) kLogPlusOneTable[iterationCount] / (double) kLogPlusOneTable[maxIterations];
 	
 	if (shadeLevel > kShadingScale)
 		shadeLevel = kShadingScale;
@@ -1489,6 +1615,7 @@ static void BeginRendering(void) {
 	GrafPtr savedPort;
 	
 	fractalRenderJob.active = true;
+	haveAccumulatedChanges  = false;
 	
 	GetPort(&savedPort);
 	SetPort(mwWindow);
@@ -1672,7 +1799,27 @@ static void StartProgressiveRender(FractalSampleProc sampleProc) {
    port is already current. Reports the block's (clipped) rect via
    drawnRect, so AdvanceFractalRender() can union it with whatever
    else it draws in the same call and blit only that combined region
-   afterward, rather than the whole image. */
+   afterward, rather than the whole image.
+   
+   A Mariani-Silver-style "confirm this block uniform from its border,
+   then skip it on every later pass" scheme was tried twice here, at
+   two different levels of caution - first checking 4 corners at any
+   block size, then 9 border points restricted to blocks 8px or
+   smaller - and abandoned both times after real testing showed a
+   visibly wrong render. The underlying problem turned out to be more
+   fundamental than either attempt's own specifics: the Mandelbrot/
+   Julia boundary is a genuine fractal, with real structure at every
+   scale, so there is no block size small enough to make "check a
+   handful of border points" a safe stand-in for "every pixel inside
+   is the same" - shrinking the block doesn't make the boundary less
+   detailed relative to it. Worse, the overhead lands exactly where it
+   can't pay off: confirmation succeeds least often near the boundary,
+   which is also where nearly all of a render's actual time goes, so
+   the extra samples spent attempting confirmation there are closer to
+   pure loss than a trade-off. Both attempts made real, measured
+   renders slower, not faster, consistent with this. Not something to
+   keep narrowing by guesswork - if this is revisited, it needs a
+   fundamentally different approach, not a smaller threshold. */
 static void DrawNextBlockAndAdvance(Rect *drawnRect) {
 	Rect	blockRect, clippedRect;
 	short	sampleX, sampleY;
@@ -2227,10 +2374,11 @@ void RenderFractalOffscreen(void) {
 
 /* AdvanceFractalRender()
    Draws up to kBlocksPerIdleSlice more blocks of whatever render job
-   is in progress, then shows the progress so far on screen. Meant to
-   be called from the main event loop's idle time (see
-   MandyWindow.c's HandleEvent()); does nothing if there's no job
-   running. */
+   is in progress, then shows the progress so far on screen - but not
+   necessarily every single time this is called; see
+   kBlitIntervalTicks' own comment for why. Meant to be called from
+   the main event loop's idle time (see MandyWindow.c's HandleEvent());
+   does nothing if there's no job running. */
 void AdvanceFractalRender(void) {
     GrafPtr	savedPort;
     short	blocksRemaining = kBlocksPerIdleSlice;
@@ -2254,8 +2402,19 @@ void AdvanceFractalRender(void) {
         UnionRect(&changedRect, &blockRect, &changedRect);
     }
     
-    EnterWindowPort();
-    BlitOffscreenToWindow(&changedRect);
+    if (haveAccumulatedChanges)
+        UnionRect(&accumulatedChangedRect, &changedRect, &accumulatedChangedRect);
+    else {
+        accumulatedChangedRect = changedRect;
+        haveAccumulatedChanges = true;
+    }
+    
+    if (!fractalRenderJob.active || TickCount() - lastBlitTick >= kBlitIntervalTicks) {
+        EnterWindowPort();
+        BlitOffscreenToWindow(&accumulatedChangedRect);
+        haveAccumulatedChanges = false;
+        lastBlitTick = TickCount();
+    }
     
     SetPort(savedPort);
 }
@@ -2265,12 +2424,30 @@ void AdvanceFractalRender(void) {
    as refined as it currently is rather than reverting to blank -
    there's nothing to "undo" back to. Safe to call whether or not a
    render is actually running. Meant to be called when the user
-   presses Command-period (see MandyWindow.c's HandleEvent()). */
+   presses Command-period (see MandyWindow.c's HandleEvent()).
+   
+   Forces a final blit of anything AdvanceFractalRender()'s own
+   throttling (kBlitIntervalTicks) had accumulated but not yet shown -
+   unlike a render finishing naturally, which is always discovered
+   from inside AdvanceFractalRender()'s own call stack (so its final
+   blit check right after already covers it), an abort runs from a
+   completely separate call path (a keypress), so nothing else would
+   ever blit those last few computed blocks otherwise. */
 void AbortFractalRender(void) {
+    GrafPtr savedPort;
+    
     if (!fractalRenderJob.active)
         return;
     
     EndRendering();
+    
+    if (haveAccumulatedChanges) {
+        GetPort(&savedPort);
+        EnterWindowPort();
+        BlitOffscreenToWindow(&accumulatedChangedRect);
+        haveAccumulatedChanges = false;
+        SetPort(savedPort);
+    }
 }
 
 /* HandleWindowResized()

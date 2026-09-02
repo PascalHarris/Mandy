@@ -383,8 +383,10 @@ static void GetScreenBoundsForWindow(Rect *outBounds) {
    partially off screen. Falling back to a full re-centre, rather than
    nudging the window-centred position back onto the screen, avoids
    the dialog ending up pinned against one edge - centred on
-   something, rather than arbitrarily placed. */
-static void CentreDialogOverMainWindow(DialogPtr dialog) {
+   something, rather than arbitrarily placed. Public (declared in
+   mwZoom.h) so mwMenus.c's About box can reuse it too, rather than
+   duplicating this logic for a second dialog. */
+void CentreDialogOverMainWindow(DialogPtr dialog) {
 	GrafPtr	savedPort;
 	Point	windowTopLeft;
 	short	windowWidth, windowHeight;
