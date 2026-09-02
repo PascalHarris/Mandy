@@ -179,10 +179,33 @@ void EnsureWindowVisible(void);
    image when one is available, rather than always re-rendering from
    scratch. */
 
-/* True while the current fractal (width) actually has a zoomable view
-   to reset - Mandelbrot or Julia, not the Tree. mwMenus.c uses this to
-   grey out Zoom Out rather than have it do nothing when clicked. */
-Boolean IsZoomOutAvailable(void);
+/* True once a render has ever been allocated (regardless of whether
+   it's still in progress, finished, or was aborted partway through) -
+   false on a fresh launch, or if the one attempt failed under low
+   memory. Used to gate Save As (both formats), zooming, and Animate -
+   none of them mean anything against a window that's never actually
+   rendered anything. */
+Boolean HasRenderableImage(void);
+
+/* True while zooming - in (mwZoom.c) or out (the Zoom Out menu item) -
+   means anything right now: the current fractal (width) must actually
+   have a zoomable view (Mandelbrot or Julia, not the Tree), and
+   HasRenderableImage() must be true. */
+Boolean IsZoomAvailable(void);
+
+/* "New Fractal" (mwMenus.c): resets to the same "nothing selected
+   yet" state the app launches into - disposes whatever's currently
+   rendered and sets width back to its own initial sentinel, so the
+   window goes blank until a fractal type is chosen again. */
+void StartNewFractal(void);
+
+/* Map width (the fractal-type selector) to and from its name as a
+   plain C string, for saving/loading fractal parameters (see
+   mwSaveAs.c). FractalTypeNameForWidth() returns "" for anything
+   unrecognised; FindFractalTypeByName() returns false (leaving
+   *outWidth untouched) for a name it doesn't recognise. */
+const char *FractalTypeNameForWidth(short widthValue);
+Boolean FindFractalTypeByName(const char *name, short *outWidth);
 
 /* Support for the Palette submenu (mwMenus.c) ------------------------
    A palette only changes what colours the offscreen store's existing
@@ -196,6 +219,13 @@ short GetPaletteCount(void);
 
 /* The currently active palette's 0-based index. */
 short GetCurrentPalette(void);
+
+/* Map a palette's index to and from its name, for saving/loading
+   fractal parameters (see mwSaveAs.c). GetPaletteName() returns "" for
+   an out-of-range index; FindPaletteByName() returns false (leaving
+   *outIndex untouched) for a name it doesn't recognise. */
+const char *GetPaletteName(short paletteIndex);
+Boolean FindPaletteByName(const char *name, short *outIndex);
 
 /* True while palette selection means anything at all - false on a
    black-and-white Mac, where there's no colour table for a palette to

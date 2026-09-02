@@ -36,12 +36,23 @@ enum {
    either way. */
 #define paletteMenuID	10
 
+/* File menu: New Fractal (StartNewFractal(), mwWindow.h) resets to a
+   blank "nothing selected" state; Open now loads a saved fractal-data
+   file (LoadFractalData(), mwSaveAs.h) rather than its original
+   "re-show the window" meaning, which New Fractal effectively takes
+   over (see StartNewFractal()'s own comment) since Open needed to
+   mean something else once fractal-data files existed to load. Close
+   is unchanged. Save As... is split into two plain items rather than
+   one dialog with a format choice - see next-improvements.md's §3 for
+   why. */
 enum {
-    openItem = 1,
+    newFractalItem = 1,
+    openItem,
     closeItem,
-    getInfoItem = 4,
-    saveAsItem,
-    quitItem = 7
+    getInfoItem = 5,
+    savePictItem,
+    saveFrctItem,
+    quitItem = 9
 };
 
 /* Fractal menu: Tree/Mandelbrot/Julia occupy items 1-3 (their item
@@ -67,7 +78,7 @@ void SetUpMenus(void) {
    	InsertMenu(fractalMenu = NewMenu(fractalID, "\pFractal"), 0);
     DrawMenuBar();
     AddResMenu(appleMenu, 'DRVR');
-    AppendMenu(fileMenu, "\pOpen/O;Close/W;(-;Get Info/I;Save As...;(-;Quit/Q");
+    AppendMenu(fileMenu, "\pNew Fractal/N;Open/O;Close/W;(-;Get Info/I;Save as PICT...;Save as Fractal Data...;(-;Quit/Q");
     AppendMenu(editMenu, "\pUndo/Z;(-;Cut/X;Copy/C;Paste/V;Clear");
     AppendMenu(fractalMenu, "\pTree/T;Mandelbrot/M;Julia/J;(-;Palette;Animate;Zoom Out");
     
@@ -112,17 +123,31 @@ void SetUpMenus(void) {
    comes up or goes away. Our application doesn't do anything with 
    the Edit menu.
    
-   Save As, Animate, and Zoom Out are all disabled while a render is
-   actively in progress - Save As and Zoom Out because the offscreen
-   store they'd read from or write to is still being written to by
-   the render itself; Animate because AnimationTask() (see
+   New Fractal, Save as PICT..., Save as Fractal Data..., Animate, and
+   Zoom Out are all disabled while a render is actively in progress -
+   New Fractal because it disposes the offscreen store
+   (StartNewFractal(), mwWindow.h), and Save As/Zoom Out because the
+   offscreen store they'd read from or write to is still being written
+   to by the render itself; Animate because AnimationTask() (see
    mwColourCycle.c) already declines to do anything mid-render anyway,
    so disabling the item just makes that visible rather than letting
-   it look like a click did nothing. All three use IsRenderActive() in
-   mwWindow.c. A finished OR aborted render leaves them enabled either
-   way - Save As and Zoom Out because GetOffscreenImage() doesn't
-   distinguish those two, and Animate because there's a real, if
-   partial, image to animate regardless of how the render ended.
+   it look like a click did nothing. All of them use IsRenderActive()
+   in mwWindow.c. A finished OR aborted render leaves them enabled
+   either way - Save As and Zoom Out because GetOffscreenImage()
+   doesn't distinguish those two, and Animate because there's a real,
+   if partial, image to animate regardless of how the render ended.
+   
+   Save as PICT... and Save as Fractal Data... are also both disabled
+   outright via HasRenderableImage() (mwWindow.h) - nothing to save,
+   in either format, against a window that's never actually rendered
+   anything (a fresh launch, before any fractal type has been picked,
+   or New Fractal having just reset back to that same state).
+   
+   Open (now LoadFractalData() - see the enum comment above for why)
+   and Get Info aren't gated on anything here: loading a fresh fractal
+   is exactly as valid with nothing on screen yet as with something
+   already there, the same way picking a fractal type from the Fractal
+   menu always is, and Get Info was never gated before this either.
    
    Animate is also disabled outright when IsAnimationAvailable() says
    it wouldn't do anything useful even once a render finishes - the
@@ -136,7 +161,7 @@ void SetUpMenus(void) {
    whether turning it on right now would be available.
    
    Zoom Out is similarly disabled outright for the Tree, via
-   IsZoomOutAvailable() - it doesn't use gView at all, so there's
+   IsZoomAvailable() - it doesn't use gView at all, so there's
    nothing for the item to reset.
    
    Palette follows the same "disabled during a render" convention for
@@ -179,12 +204,13 @@ void AdjustMenus(void) {
     enable(editMenu, 5, DA);
     enable(editMenu, 6, DA);
     
-    enable(fileMenu, openItem, !((WindowPeek) mwWindow)->visible);
+    enable(fileMenu, newFractalItem, !IsRenderActive());
     enable(fileMenu, closeItem, DA || ((WindowPeek) mwWindow)->visible);
-    enable(fileMenu, saveAsItem, !IsRenderActive());
+    enable(fileMenu, savePictItem, !IsRenderActive() && HasRenderableImage());
+    enable(fileMenu, saveFrctItem, !IsRenderActive() && HasRenderableImage());
     
     enable(fractalMenu, animateItem, !IsRenderActive() && (IsAnimationAvailable() || IsAnimationActive()));
-    enable(fractalMenu, zoomOutItem, !IsRenderActive() && IsZoomOutAvailable());
+    enable(fractalMenu, zoomOutItem, !IsRenderActive() && IsZoomAvailable());
     /* Re-asserts every part of the hierarchical link between
        fractalMenu's "Palette" item and paletteMenu, every single time
        - rather than trusting the one-time setup in SetUpMenus() to
@@ -258,9 +284,14 @@ void HandleMenu (long mSelect) {
             
         case fileID:
             switch (menuItem) {
+            case newFractalItem:
+                StartNewFractal();
+                EnsureWindowVisible();
+                InvalRect(&mwWindow->portRect);
+                break;
+                
             case openItem:
-                ShowWindow(mwWindow);
-                SelectWindow(mwWindow);
+                LoadFractalData();
                 break;
                 
             case closeItem:
@@ -277,8 +308,12 @@ void HandleMenu (long mSelect) {
                 ShowInfoWindow();
                 break;
                 
-            case saveAsItem:
+            case savePictItem:
                 SaveFractalAsPICT();
+                break;
+                
+            case saveFrctItem:
+                SaveFractalData();
                 break;
                 
             case quitItem:

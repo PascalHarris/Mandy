@@ -6,3 +6,5 @@
  *****/
 
 void SaveFractalAsPICT(void);
+void SaveFractalData(void);
+void LoadFractalData(void);

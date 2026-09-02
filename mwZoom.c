@@ -122,12 +122,19 @@ static Boolean ConfirmUseLargestSize(void);
 static void    FindLargestSizeFittingMemory(short maxWidth, short maxHeight, long availableBytes, short *outWidth, short *outHeight);
 
 /* TrackMarqueeAndZoom()
-   See mwZoom.h. */
+   See mwZoom.h. Guards on the same IsZoomAvailable()/IsRenderActive()
+   pair KeyboardZoom() already does, for the same reasons - a mouse-down
+   in the content area shouldn't start a marquee at all against the
+   Tree, an in-progress render, or a window that's never rendered
+   anything yet (width still kNoFractalSelectedWidth). */
 void TrackMarqueeAndZoom(Point globalMouseDownPoint) {
 	Point	localAnchor, currentPoint;
 	Rect	marqueeRect, previousRect;
 	Boolean	haveDrawnAFrame = false;
 	GrafPtr	savedPort;
+	
+	if (!IsZoomAvailable() || IsRenderActive())
+		return;
 	
 	GetPort(&savedPort);
 	SetPort(mwWindow);
@@ -719,7 +726,7 @@ void TrackWindowResize(Point globalMouseDownPoint) {
 void KeyboardZoom(Boolean zoomIn) {
 	double proposedHalfWidthRe;
 	
-	if (!IsZoomOutAvailable() || IsRenderActive())
+	if (!IsZoomAvailable() || IsRenderActive())
 		return;
 	
 	proposedHalfWidthRe = zoomIn ? (gView.halfWidthRe / 2.0) : (gView.halfWidthRe * 2.0);

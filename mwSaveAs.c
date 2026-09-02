@@ -1,7 +1,10 @@
 /*****
  * mwSaveAs.c
  *
- *	Save As... - exports the current fractal image as a PICT file.
+ *	Saving and loading fractal-related files: exporting the current
+ *	image as a PICT (SaveFractalAsPICT()), saving the parameters
+ *	needed to recompute it as a small text file (SaveFractalData()),
+ *	and loading one of those text files back (LoadFractalData()).
  *	Reads whatever GetOffscreenImage() (mwWindow.c) currently holds,
  *	complete, partial, or aborted - Save As is greyed out by
  *	mwMenus.c's AdjustMenus() while a render is actively in progress
@@ -11,19 +14,26 @@
  *****/
 #include "mwSaveAs.h"
 #include "mwWindow.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #ifndef _Quickdraw_
 #include <Quickdraw.h>
 #endif
 
 extern	WindowPtr	mwWindow;
+extern	int			width;
 
-/* Swap in 45RPM Software's own registered creator code here once
-   available; '????' is a placeholder so this doesn't silently claim
-   a real application's identity in the meantime. The file type
-   'PICT' is what actually matters for the Finder and other apps to
-   recognise this as a picture, regardless of the creator code. */
-#define kFileCreator	'????'
+/* 45RPM Software's registered creator code, used for every file this
+   project creates (both PICT and FRCT - see kFileType/kFrctFileType
+   below). Matching this exactly against the application's own
+   creator code (set in Think C's Project Type settings, not in code -
+   see the resource requirements this feature needs, documented
+   separately) is what lets the Finder find this app's BNDL/FREF/ICN#
+   resources and show the right icon for files it creates. */
+#define kFileCreator	'MNDy'
 #define kFileType		'PICT'
+#define kFrctFileType	'FRCT'
 
 /* Classic PICT files store 512 bytes of (conventionally zero-filled)
    padding before the actual picture data - historically reserved for
@@ -31,8 +41,19 @@ extern	WindowPtr	mwWindow;
    other applications' PICT readers rely on. */
 #define kPictFileHeaderSize	512
 
+/* A generous ceiling on a fractal-data file's size - the format is a
+   handful of short "Key: value" lines (see SaveFractalData()'s own
+   comment), so anything anywhere near this large is almost certainly
+   the wrong kind of file, not a legitimately large one. Guards
+   LoadFractalData()'s single whole-file NewPtr() against an
+   unreasonable allocation rather than any real format need. */
+#define kMaxFractalDataFileSize	4096
+
 static PicHandle	RecordPicture(const BitMap *sourceBits, const Rect *sourceBounds);
+static Boolean		CreateAndOpenForWriting(ConstStr255Param fileName, short vRefNum, OSType fileType, short *outRefNum);
 static Boolean		WritePictureToFile(PicHandle picture, ConstStr255Param fileName, short vRefNum);
+static Boolean		WriteTextToFile(const char *text, long length, ConstStr255Param fileName, short vRefNum);
+static void			ApplyFractalDataText(char *text);
 
 /* SaveFractalAsPICT()
    Prompts for a filename via the Standard File Package, records the
@@ -113,13 +134,18 @@ static PicHandle RecordPicture(const BitMap *sourceBits, const Rect *sourceBound
    exists) the destination file, writes the 512-byte header PICT files
    conventionally start with, then the picture data itself. Returns
    false on any failure along the way. */
-static Boolean WritePictureToFile(PicHandle picture, ConstStr255Param fileName, short vRefNum) {
+/* CreateAndOpenForWriting()
+   Creates (or truncates and reuses, if the chosen name already
+   exists) a file for writing, returning its open reference number via
+   *outRefNum. Shared by WritePictureToFile() and WriteTextToFile() -
+   both start with exactly this same Create()/FSOpen()/SetEOF()
+   sequence, differing only in what they write afterward. Returns
+   false (leaving *outRefNum untouched) on any failure. */
+static Boolean CreateAndOpenForWriting(ConstStr255Param fileName, short vRefNum, OSType fileType, short *outRefNum) {
 	OSErr	error;
 	short	refNum;
-	long	byteCount;
-	Ptr		zeroHeader;
 	
-	error = Create(fileName, vRefNum, kFileCreator, kFileType);
+	error = Create(fileName, vRefNum, kFileCreator, fileType);
 	if (error != noErr && error != dupFNErr)
 		return false;
 	
@@ -128,6 +154,19 @@ static Boolean WritePictureToFile(PicHandle picture, ConstStr255Param fileName, 
 		return false;
 	
 	SetEOF(refNum, 0);	/* in case an existing file being overwritten was larger */
+	
+	*outRefNum = refNum;
+	return true;
+}
+
+static Boolean WritePictureToFile(PicHandle picture, ConstStr255Param fileName, short vRefNum) {
+	OSErr	error;
+	short	refNum;
+	long	byteCount;
+	Ptr		zeroHeader;
+	
+	if (!CreateAndOpenForWriting(fileName, vRefNum, kFileType, &refNum))
+		return false;
 	
 	zeroHeader = NewPtrClear((long) kPictFileHeaderSize);
 	if (zeroHeader == NULL) {
@@ -150,4 +189,250 @@ static Boolean WritePictureToFile(PicHandle picture, ConstStr255Param fileName, 
 	FlushVol(NULL, vRefNum);
 	
 	return (error == noErr);
+}
+
+/* WriteTextToFile()
+   Writes length bytes of plain text to a file, via the same
+   Create()/FSOpen()/SetEOF() sequence WritePictureToFile() uses (see
+   CreateAndOpenForWriting()). Used by SaveFractalData() - text is
+   written whole in one FSWrite() rather than line by line, since the
+   whole file (a handful of short "Key: value" lines) is already
+   sitting fully formatted in memory by the time this is called. */
+static Boolean WriteTextToFile(const char *text, long length, ConstStr255Param fileName, short vRefNum) {
+	OSErr	error;
+	short	refNum;
+	long	byteCount;
+	
+	if (!CreateAndOpenForWriting(fileName, vRefNum, kFrctFileType, &refNum))
+		return false;
+	
+	byteCount = length;
+	error = FSWrite(refNum, &byteCount, (Ptr) text);
+	
+	FSClose(refNum);
+	FlushVol(NULL, vRefNum);
+	
+	return (error == noErr);
+}
+
+
+/* SaveFractalData()
+   Prompts for a filename via the Standard File Package, and writes
+   out a small text file recording enough to recompute the current
+   fractal - never the image itself (that's what Save as PICT... is
+   for) - as a series of "Key: value" lines, one per line, extensible
+   by simply omitting keys that don't apply to the current fractal
+   type and having LoadFractalData()/ApplyFractalDataText() ignore any
+   key they don't recognise. Type is always present and is the
+   fractal's own name (FractalTypeNameForWidth()) rather than width's
+   raw numeric value, so a saved file's meaning survives even if new
+   fractal types are ever inserted ahead of existing ones.
+   CentreRe/CentreIm/HalfWidthRe (gView) are omitted for the Tree,
+   which doesn't use gView at all; ConstantRe/ConstantIm
+   (GetFractalParameters()) are present only for Julia, whose constant
+   is currently fixed rather than user-adjustable, but are still
+   written for forward-compatibility once/if that changes. Palette is
+   always present (GetPaletteName()) - a palette is a display
+   preference independent of the fractal itself, not something to omit
+   based on fractal type.
+   
+   Lines end in \r, the classic Mac OS text-file convention, so the
+   file reads correctly line-by-line in a plain text editor. Numbers
+   are written to 6 decimal places - matching this project's existing
+   float-precision ceiling elsewhere in the render pipeline (see
+   IterateEscapeTime()), so this doesn't imply more precision than a
+   reloaded value could actually make use of.
+   
+   Beeps and gives up at any failure point rather than raising an
+   alert - see SaveFractalAsPICT()'s own comment on why. */
+void SaveFractalData(void) {
+	SFReply				reply;
+	Point				dialogLocation = { 100, 100 };
+	char				buffer[512];
+	int					length = 0;
+	FractalParameters	params;
+	
+	if (!HasRenderableImage()) {
+		SysBeep(1);	/* nothing rendered yet to save */
+		return;
+	}
+	
+	length += sprintf(buffer + length, "Type: %s\r", FractalTypeNameForWidth(width));
+	
+	if (width == 2 || width == 3) {
+		length += sprintf(buffer + length, "CentreRe: %.6f\r", gView.centreRe);
+		length += sprintf(buffer + length, "CentreIm: %.6f\r", gView.centreIm);
+		length += sprintf(buffer + length, "HalfWidthRe: %.6f\r", gView.halfWidthRe);
+	}
+	
+	if (width == 3) {
+		params = GetFractalParameters();
+		length += sprintf(buffer + length, "ConstantRe: %.6f\r", params.constantRe);
+		length += sprintf(buffer + length, "ConstantIm: %.6f\r", params.constantIm);
+	}
+	
+	length += sprintf(buffer + length, "Palette: %s\r", GetPaletteName(GetCurrentPalette()));
+	
+	SFPutFile(dialogLocation, "\pSave fractal data as:", "\pFractal Data", NULL, &reply);
+	
+	if (!reply.good)
+		return;
+	
+	if (!WriteTextToFile(buffer, (long) length, reply.fName, reply.vRefNum))
+		SysBeep(1);
+}
+
+/* LoadFractalData()
+   Prompts for a file via the Standard File Package, filtered to the
+   'FRCT' type SaveFractalData() writes (so the dialog only ever shows
+   files this feature itself could have produced), reads it whole into
+   memory, and hands the text to ApplyFractalDataText() to parse and
+   apply. No gating on HasRenderableImage() or IsRenderActive() the way
+   Save As/zooming/Animate have - loading a fresh fractal is exactly
+   as valid with nothing on screen yet as with something already
+   there, the same way choosing a fractal type from the Fractal menu
+   always is. */
+void LoadFractalData(void) {
+	SFTypeList	typeList = { kFrctFileType, 0, 0, 0 };
+	SFReply		reply;
+	Point		dialogLocation = { 100, 100 };
+	short		refNum;
+	long		fileSize;
+	OSErr		error;
+	Ptr			buffer;
+	
+	SFGetFile(dialogLocation, "\p", NULL, 1, typeList, NULL, &reply);
+	
+	if (!reply.good)
+		return;
+	
+	error = FSOpen(reply.fName, reply.vRefNum, &refNum);
+	if (error != noErr) {
+		SysBeep(1);
+		return;
+	}
+	
+	error = GetEOF(refNum, &fileSize);
+	if (error != noErr || fileSize <= 0 || fileSize > kMaxFractalDataFileSize) {
+		FSClose(refNum);
+		SysBeep(1);
+		return;
+	}
+	
+	buffer = NewPtr(fileSize + 1);
+	if (buffer == NULL) {
+		FSClose(refNum);
+		SysBeep(1);
+		return;
+	}
+	
+	error = FSRead(refNum, &fileSize, buffer);
+	FSClose(refNum);
+	
+	if (error != noErr) {
+		DisposePtr(buffer);
+		SysBeep(1);
+		return;
+	}
+	
+	buffer[fileSize] = '\0';
+	
+	ApplyFractalDataText(buffer);
+	
+	DisposePtr(buffer);
+}
+
+/* ApplyFractalDataText()
+   Parses text's "Key: value" lines (see SaveFractalData()'s own
+   comment on the format) and applies whatever it finds: sets width
+   from a recognised Type, resets to that fractal's own default view
+   (ResetViewForCurrentFractal()) and then overwrites it with a saved
+   CentreRe/CentreIm/HalfWidthRe if all were present, and switches to
+   a recognised Palette. Unrecognised keys, and CentreRe/CentreIm/
+   HalfWidthRe when they're absent (as they always will be for a saved
+   Tree), are simply skipped rather than treated as errors - exactly
+   the extensibility SaveFractalData()'s own comment describes.
+   
+   Modifies text in place (splitting it into NUL-terminated lines by
+   overwriting each line ending) rather than copying - LoadFractalData()
+   passes ownership of a buffer it's about to dispose right after this
+   returns, so there's nothing to preserve. Line endings are read
+   leniently (\r, \n, or \r\n) even though SaveFractalData() only ever
+   writes \r, in case a file was ever edited elsewhere before being
+   loaded back.
+   
+   If no recognised Type line is found at all, beeps and leaves
+   everything - width, gView, the current palette - untouched, rather
+   than rendering a blank or partially-updated fractal from a file
+   that wasn't really in this format to begin with. */
+static void ApplyFractalDataText(char *text) {
+	char	*lineStart = text;
+	short	newWidth = -1;
+	double	centreRe = 0.0, centreIm = 0.0, halfWidthRe = 0.0;
+	Boolean	haveView = false;
+	short	paletteIndex = 0;
+	Boolean	havePalette = false;
+	
+	while (*lineStart != '\0') {
+		char	*lineEnd = lineStart;
+		char	*nextLine;
+		char	*colon;
+		char	*value;
+		
+		while (*lineEnd != '\0' && *lineEnd != '\r' && *lineEnd != '\n')
+			lineEnd++;
+		
+		nextLine = lineEnd;
+		if (*nextLine == '\r' || *nextLine == '\n') {
+			char terminator = *nextLine;
+			nextLine++;
+			if (terminator == '\r' && *nextLine == '\n')
+				nextLine++;
+		}
+		*lineEnd = '\0';
+		
+		colon = strchr(lineStart, ':');
+		if (colon != NULL) {
+			*colon = '\0';
+			value = colon + 1;
+			while (*value == ' ')
+				value++;
+			
+			if (strcmp(lineStart, "Type") == 0) {
+				FindFractalTypeByName(value, &newWidth);
+			} else if (strcmp(lineStart, "CentreRe") == 0) {
+				centreRe = atof(value);
+				haveView = true;
+			} else if (strcmp(lineStart, "CentreIm") == 0) {
+				centreIm = atof(value);
+			} else if (strcmp(lineStart, "HalfWidthRe") == 0) {
+				halfWidthRe = atof(value);
+			} else if (strcmp(lineStart, "Palette") == 0) {
+				havePalette = FindPaletteByName(value, &paletteIndex);
+			}
+		}
+		
+		lineStart = nextLine;
+	}
+	
+	if (newWidth == -1) {
+		SysBeep(1);	/* not a Type line this build recognises - nothing applied */
+		return;
+	}
+	
+	width = newWidth;
+	ResetViewForCurrentFractal();
+	
+	if (haveView) {
+		gView.centreRe    = centreRe;
+		gView.centreIm    = centreIm;
+		gView.halfWidthRe = ClampHalfWidthRe(halfWidthRe);
+	}
+	
+	if (havePalette)
+		SetCurrentPalette(paletteIndex);
+	
+	EnsureWindowVisible();
+	RenderFractalOffscreen();
+	InvalRect(&mwWindow->portRect);
 }

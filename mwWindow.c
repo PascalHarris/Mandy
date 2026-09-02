@@ -6,6 +6,7 @@
  *****/
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 #include <QDOffscreen.h>
 #include "mwWindow.h"
 #ifndef _Quickdraw_
@@ -127,7 +128,17 @@ Rect		dragRect;
    directly, by assignment, on every actual resize. */
 Rect		windowBounds = { windowY, windowX, windowY+300, windowX+512 };
 Rect		imageStart = {0, 0, 300, 512};
-int			width = 5; 
+
+/* width doubles as the fractal-type selector (1=Tree, 2=Mandelbrot,
+   3=Julia - see HandleMenu()'s fractalID case in mwMenus.c) and,
+   before the person has ever picked one, a sentinel meaning "nothing
+   selected yet" - deliberately a value none of the real fractal types
+   use, so RenderFractalOffscreen()'s width==1/2/3 checks all
+   correctly fall through to doing nothing, leaving the window blank
+   exactly as it is on a fresh launch. StartNewFractal() (mwMenus.c's
+   "New Fractal") resets back to this same value. */
+#define kNoFractalSelectedWidth	5
+int			width = kNoFractalSelectedWidth;
 
 /* The current Mandelbrot/Julia view - see FractalView in mwWindow.h.
    Initialised to Mandelbrot's own default so it's never garbage even
@@ -183,7 +194,7 @@ void MapPixelToComplexPlane(short x, short y, double *outRe, double *outIm) {
    ever-larger, eventually meaningless region beyond what the fractal
    was ever meant to be viewed at. Falls back to Mandelbrot's own
    default for any other width - shouldn't be reached in practice,
-   since callers check IsZoomOutAvailable() first, but returning a
+   since callers check IsZoomAvailable() first, but returning a
    sensible, real value here instead of leaving this undefined for a
    caller that doesn't check first, does no harm. */
 static double MaximumHalfWidthReForCurrentFractal(void) {
@@ -725,14 +736,23 @@ typedef struct {
 #define kMaxColourRampStops	7
 
 typedef struct {
+	const char		*name;
 	short			stopCount;
 	ColourRampStop	stops[kMaxColourRampStops];
 } PaletteDefinition;
 
+/* name is used two ways: mwMenus.c's Palette submenu string must list
+   these in this exact same order (AppendMenu() takes one hardcoded
+   Pascal string, not this array, so the two have to be kept in sync
+   by hand - see the comment there), and GetPaletteName()/
+   FindPaletteByName() below use it directly for saving/loading a
+   palette by name in a FRCT file (see mwSaveAs.c) rather than by this
+   array's index, so a saved file's meaning survives even if palettes
+   are ever reordered. */
 static const PaletteDefinition kPalettes[] = {
 	/* Default - white through yellow/orange/red-purple to black; the
 	   original ramp, unchanged from before palettes existed. */
-	{ 5, {
+	{ "Default", 5, {
 		{ 0,                       { 65535, 65535, 65535 } },
 		{ kShadingScale / 4,       { 65535, 65535, 0     } },
 		{ kShadingScale / 2,       { 65535, 16384, 0     } },
@@ -740,7 +760,7 @@ static const PaletteDefinition kPalettes[] = {
 		{ kShadingScale,           { 0,     0,     0     } }
 	}},
 	/* Night - dark navy through indigo and deep purple to near-black. */
-	{ 4, {
+	{ "Night", 4, {
 		{ 0,                       { 0,     0,     16384 } },
 		{ kShadingScale / 3,       { 8192,  0,     32768 } },
 		{ (kShadingScale * 2) / 3, { 24576, 0,     40960 } },
@@ -748,7 +768,7 @@ static const PaletteDefinition kPalettes[] = {
 	}},
 	/* Stormy - pale grey through slate grey and charcoal to near-black,
 	   a cool undertone throughout. */
-	{ 4, {
+	{ "Stormy", 4, {
 		{ 0,                       { 49152, 49152, 53248 } },
 		{ kShadingScale / 3,       { 28672, 28672, 32768 } },
 		{ (kShadingScale * 2) / 3, { 12288, 12288, 16384 } },
@@ -756,14 +776,14 @@ static const PaletteDefinition kPalettes[] = {
 	}},
 	/* Summery - white through bright yellow and sky blue to grass
 	   green. */
-	{ 4, {
+	{ "Summery", 4, {
 		{ 0,                       { 65535, 65535, 65535 } },
 		{ kShadingScale / 3,       { 65535, 65535, 16384 } },
 		{ (kShadingScale * 2) / 3, { 16384, 49152, 65535 } },
 		{ kShadingScale,           { 8192,  49152, 8192  } }
 	}},
 	/* Autumnal - pale gold through orange and rust red to deep brown. */
-	{ 4, {
+	{ "Autumnal", 4, {
 		{ 0,                       { 65535, 57344, 32768 } },
 		{ kShadingScale / 3,       { 65535, 32768, 8192  } },
 		{ (kShadingScale * 2) / 3, { 49152, 16384, 4096  } },
@@ -771,7 +791,7 @@ static const PaletteDefinition kPalettes[] = {
 	}},
 	/* Wintery - white through pale ice blue and pale grey to soft
 	   blue-grey. */
-	{ 4, {
+	{ "Wintery", 4, {
 		{ 0,                       { 65535, 65535, 65535 } },
 		{ kShadingScale / 3,       { 53248, 60416, 65535 } },
 		{ (kShadingScale * 2) / 3, { 45056, 45056, 49152 } },
@@ -779,7 +799,7 @@ static const PaletteDefinition kPalettes[] = {
 	}},
 	/* Pastel - soft pink, lavender, mint, pale yellow, soft peach - all
 	   high-lightness, low-saturation. */
-	{ 5, {
+	{ "Pastel", 5, {
 		{ 0,                       { 65535, 53248, 57344 } },
 		{ kShadingScale / 4,       { 53248, 49152, 65535 } },
 		{ kShadingScale / 2,       { 49152, 65535, 57344 } },
@@ -788,7 +808,7 @@ static const PaletteDefinition kPalettes[] = {
 	}},
 	/* Rainbow - a full hue sweep: red, orange, yellow, green, blue,
 	   indigo, violet. */
-	{ 7, {
+	{ "Rainbow", 7, {
 		{ 0,                       { 65535, 0,     0     } },
 		{ (kShadingScale * 1) / 6, { 65535, 32768, 0     } },
 		{ (kShadingScale * 2) / 6, { 65535, 65535, 0     } },
@@ -799,7 +819,7 @@ static const PaletteDefinition kPalettes[] = {
 	}},
 	/* Fire (suggested) - white through bright yellow and orange to
 	   deep red then black - hotter and more saturated than Default. */
-	{ 5, {
+	{ "Fire", 5, {
 		{ 0,                       { 65535, 65535, 65535 } },
 		{ kShadingScale / 4,       { 65535, 65535, 8192  } },
 		{ kShadingScale / 2,       { 65535, 24576, 0     } },
@@ -807,7 +827,7 @@ static const PaletteDefinition kPalettes[] = {
 		{ kShadingScale,           { 0,     0,     0     } }
 	}},
 	/* Ocean (suggested) - white through cyan and teal to deep navy. */
-	{ 4, {
+	{ "Ocean", 4, {
 		{ 0,                       { 65535, 65535, 65535 } },
 		{ kShadingScale / 3,       { 16384, 57344, 65535 } },
 		{ (kShadingScale * 2) / 3, { 0,     32768, 40960 } },
@@ -817,7 +837,7 @@ static const PaletteDefinition kPalettes[] = {
 	   hue at all - a plain baseline, and cheap to reason about when
 	   debugging shading itself independent of any palette's own
 	   colour choices. */
-	{ 3, {
+	{ "Greyscale", 3, {
 		{ 0,                       { 65535, 65535, 65535 } },
 		{ kShadingScale / 2,       { 32768, 32768, 32768 } },
 		{ kShadingScale,           { 0,     0,     0     } }
@@ -1790,6 +1810,9 @@ Boolean IsRenderingInColour(void) {
    exactly the kind of fractal-specific detail that belongs in this
    file rather than leaking into mwColourCycle.c or mwMenus.c. */
 Boolean IsAnimationAvailable(void) {
+	if (!HasRenderableImage())
+		return false;
+	
 	if (ShouldRenderInColour())
 		return true;
 	
@@ -1890,13 +1913,78 @@ void EnsureWindowVisible(void) {
 	SelectWindow(mwWindow);
 }
 
-/* IsZoomOutAvailable()
-   True while the current fractal (width) actually has a zoomable
-   view to reset - Mandelbrot or Julia. False for the Tree, which
-   doesn't use gView at all, so mwMenus.c can grey out "Zoom Out" for
-   it rather than have it do nothing when clicked. */
-Boolean IsZoomOutAvailable(void) {
-	return (width == 2 || width == 3);
+/* HasRenderableImage()
+   Whether there's anything meaningful to read from the offscreen
+   store right now - true once a render has ever been allocated
+   (offscreenReady), regardless of whether it's still in progress,
+   finished, or was aborted partway through; false if none ever has -
+   on a fresh launch (width still kNoFractalSelectedWidth, nothing
+   picked yet) or if the one attempt failed under low memory (see
+   AllocateOffscreenStore()). Used to gate Save As (both PICT and
+   fractal-data), zooming in and out, and Animate - none of them mean
+   anything against a window that's never actually rendered anything. */
+Boolean HasRenderableImage(void) {
+	return offscreenReady;
+}
+
+/* IsZoomAvailable()
+   True while zooming - in (mwZoom.c's marquee tracking and keyboard
+   zoom) or out (the Zoom Out menu item, and keyboard zoom's other
+   direction) - means anything right now: the current fractal (width)
+   must actually have a zoomable view (Mandelbrot or Julia; false for
+   the Tree, which doesn't use gView at all), and something must have
+   been rendered at all (HasRenderableImage()) for a zoom to have
+   anything meaningful to act on. */
+Boolean IsZoomAvailable(void) {
+	return (width == 2 || width == 3) && HasRenderableImage();
+}
+
+/* StartNewFractal()
+   "New Fractal" (mwMenus.c): resets to the same "nothing selected
+   yet" state the app launches into - disposes whatever's currently
+   rendered (DisposeOffscreenStore(), safe to call regardless of
+   whether anything was actually allocated) and sets width back to
+   kNoFractalSelectedWidth, so the window goes blank until the person
+   picks a fractal type from the Fractal menu again, exactly as it
+   does on a fresh launch. Doesn't touch gView or the current palette -
+   ResetViewForCurrentFractal() already runs whenever a fractal type
+   is next chosen, and the palette is a display preference independent
+   of any one fractal's own state (see currentPalette's own comment). */
+void StartNewFractal(void) {
+	DisposeOffscreenStore();
+	width = kNoFractalSelectedWidth;
+}
+
+/* FractalTypeNameForWidth()/FindFractalTypeByWidth()
+   Map width (the fractal-type selector) to and from its name as a
+   plain C string, for saving/loading fractal parameters (see
+   mwSaveAs.c's SaveFractalData()/LoadFractalData()) - a name rather
+   than width's raw numeric value, so a saved file's meaning survives
+   even if new fractal types are ever inserted ahead of existing ones
+   (see next-improvements.md's §5 for what those might be).
+   FractalTypeNameForWidth() returns "" for kNoFractalSelectedWidth or
+   anything else unrecognised - callers only ever call it once a
+   fractal has actually been rendered (HasRenderableImage()), so this
+   case shouldn't be reached in practice, but returning an empty name
+   rather than a garbage one does no harm if it somehow is.
+   FindFractalTypeByName() returns false (leaving *outWidth untouched)
+   for a name it doesn't recognise, so a saved file naming a fractal
+   type this build doesn't have yet fails that one line rather than
+   the whole load. */
+const char *FractalTypeNameForWidth(short widthValue) {
+	switch (widthValue) {
+		case 1:  return "Tree";
+		case 2:  return "Mandelbrot";
+		case 3:  return "Julia";
+		default: return "";
+	}
+}
+
+Boolean FindFractalTypeByName(const char *name, short *outWidth) {
+	if (strcmp(name, "Tree") == 0)       { *outWidth = 1; return true; }
+	if (strcmp(name, "Mandelbrot") == 0) { *outWidth = 2; return true; }
+	if (strcmp(name, "Julia") == 0)      { *outWidth = 3; return true; }
+	return false;
 }
 
 /* RebuildOffscreenColourTableForCurrentPalette()
@@ -1953,6 +2041,36 @@ short GetPaletteCount(void) {
    The currently active palette's 0-based index into kPalettes[]. */
 short GetCurrentPalette(void) {
 	return currentPalette;
+}
+
+/* GetPaletteName()/FindPaletteByName()
+   Map a palette's index to and from its name (kPalettes[]'s own name
+   field - see its comment), for saving/loading fractal parameters
+   (see mwSaveAs.c's SaveFractalData()/LoadFractalData()) - a name
+   rather than a raw index, so a saved file's meaning survives even if
+   palettes are ever reordered or new ones inserted ahead of existing
+   ones. GetPaletteName() returns "" for an out-of-range index, which
+   shouldn't be reached in practice since callers only ever pass
+   GetCurrentPalette()'s own result. FindPaletteByName() returns false
+   (leaving *outIndex untouched) for a name it doesn't recognise, so a
+   saved file naming a palette this build doesn't have fails that one
+   line rather than the whole load - LoadFractalData() leaves the
+   current palette unchanged in that case. */
+const char *GetPaletteName(short paletteIndex) {
+	if (paletteIndex < 0 || paletteIndex >= kPaletteCount)
+		return "";
+	return kPalettes[paletteIndex].name;
+}
+
+Boolean FindPaletteByName(const char *name, short *outIndex) {
+	short i;
+	for (i = 0; i < kPaletteCount; i++) {
+		if (strcmp(kPalettes[i].name, name) == 0) {
+			*outIndex = i;
+			return true;
+		}
+	}
+	return false;
 }
 
 /* IsPaletteAvailable()
