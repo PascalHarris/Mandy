@@ -122,18 +122,25 @@ static Boolean ConfirmUseLargestSize(void);
 static void    FindLargestSizeFittingMemory(short maxWidth, short maxHeight, long availableBytes, short *outWidth, short *outHeight);
 
 /* TrackMarqueeAndZoom()
-   See mwZoom.h. Guards on the same IsZoomAvailable()/IsRenderActive()
-   pair KeyboardZoom() already does, for the same reasons - a mouse-down
-   in the content area shouldn't start a marquee at all against the
-   Tree, an in-progress render, or a window that's never rendered
-   anything yet (width still kNoFractalSelectedWidth). */
+   See mwZoom.h. Guards on IsZoomAvailable() only - a mouse-down in the
+   content area shouldn't start a marquee against the Tree, or a
+   window that's never rendered anything yet (width still
+   kNoFractalSelectedWidth), but zooming during an active render is
+   fine and deliberately allowed: RenderFractalOffscreen()'s own
+   comment on fractalRenderJob notes there's only ever one job at a
+   time, and starting a new one simply overwrites whatever was in
+   progress - exactly what already happens, unguarded, when switching
+   fractal types from the Fractal menu mid-render. Zooming during a
+   render used to require aborting first; that was this guard also
+   checking IsRenderActive(), which was more cautious than the
+   underlying render machinery actually needs. */
 void TrackMarqueeAndZoom(Point globalMouseDownPoint) {
 	Point	localAnchor, currentPoint;
 	Rect	marqueeRect, previousRect;
 	Boolean	haveDrawnAFrame = false;
 	GrafPtr	savedPort;
 	
-	if (!IsZoomAvailable() || IsRenderActive())
+	if (!IsZoomAvailable())
 		return;
 	
 	GetPort(&savedPort);
@@ -722,11 +729,13 @@ void TrackWindowResize(Point globalMouseDownPoint) {
    the centre doesn't move). ClampHalfWidthRe() (mwWindow.h) keeps
    repeated presses from zooming in past the point float precision in
    the per-pixel iteration can resolve, or out past the current
-   fractal's own natural extent. */
+   fractal's own natural extent. Guards on IsZoomAvailable() only - see
+   TrackMarqueeAndZoom()'s own comment on why zooming mid-render is
+   fine and deliberately allowed, not something to guard against. */
 void KeyboardZoom(Boolean zoomIn) {
 	double proposedHalfWidthRe;
 	
-	if (!IsZoomAvailable() || IsRenderActive())
+	if (!IsZoomAvailable())
 		return;
 	
 	proposedHalfWidthRe = zoomIn ? (gView.halfWidthRe / 2.0) : (gView.halfWidthRe * 2.0);
