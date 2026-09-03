@@ -238,10 +238,15 @@ static Boolean WriteTextToFile(const char *text, long length, ConstStr255Param f
    
    Lines end in \r, the classic Mac OS text-file convention, so the
    file reads correctly line-by-line in a plain text editor. Numbers
-   are written to 6 decimal places - matching this project's existing
-   float-precision ceiling elsewhere in the render pipeline (see
-   IterateEscapeTime()), so this doesn't imply more precision than a
-   reloaded value could actually make use of.
+   are written to 6 decimal places - a reasonable middle ground given
+   this project now has two, very different per-pixel precisions
+   depending on gHasFPU (see FractalView's own comment in mwWindow.h):
+   comfortably more than the fixed-point path's own effective
+   precision at deep zoom, if noticeably less than the floating-point
+   path's double could in principle make use of. gView itself is
+   always double regardless of which path rendered it, so this is a
+   choice about the saved file's own readability and portability
+   between the two, not a limit imposed by either.
    
    Beeps and gives up at any failure point rather than raising an
    alert - see SaveFractalAsPICT()'s own comment on why. */

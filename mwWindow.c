@@ -9,11 +9,16 @@
 #include <string.h>
 #include <QDOffscreen.h>
 #include "mwWindow.h"
+#include "mwFractalMath.h"	/* iteration, interior/shading maths - see that file */
 #ifndef _Quickdraw_
 #include <Quickdraw.h>
 #endif
+#ifndef _FixMath_
+#include <FixMath.h>	/* Fixed - Fixed-typed globals below still need this directly */
+#endif
 
 extern	Boolean	gHasColourQD;	/* set once in MandyWindow.c's InitMacintosh() */
+extern	Boolean	gHasFPU;		/* set once in MandyWindow.c's InitMacintosh() */
 
 #define windowX 0
 #define windowY 40
@@ -85,16 +90,13 @@ static short windowHeight = 300;
    ever finishes short of what it actually computed. */
 #define kBlitIntervalTicks		6
 
-/* Escape-time fractal parameters. kShadingScale is the common range
-   both SampleMandelbrot() and SampleJulia() report on, so ShadeBlock()
-   can use one fixed set of thresholds (monochrome) or one fixed colour
-   ramp (colour) regardless of which fractal's own maxIterations
-   produced the value.
-   
-   kMinimumIterationCeiling is the floor UpdateIterationCeilingForBlockSize()
+/* kMinimumIterationCeiling: the floor UpdateIterationCeilingForBlockSize()
    won't reduce a coarse pass's ceiling below - see that function for
-   why coarse passes get a reduced ceiling at all. */
-#define kShadingScale			64
+   why coarse passes get a reduced ceiling at all. kShadingScale, the
+   common range SampleMandelbrot()/SampleJulia() report shade levels
+   on regardless of which fractal's maxIterations produced them, now
+   lives in mwFractalMath.h alongside ShadeLevelForIterationCount(),
+   the function that actually produces values on that scale. */
 #define kMinimumIterationCeiling	4
 
 /* Mandelbrot and Julia's own natural default views - see FractalView
@@ -127,9 +129,25 @@ static short windowHeight = 300;
 
 #define kMandelbrotMaxIterations	64
 
-#define kJuliaConstantRe		-0.7f
-#define kJuliaConstantIm		0.27015f
+#define kJuliaConstantRe		-0.7
+#define kJuliaConstantIm		0.27015
 #define kJuliaMaxIterations		300
+
+/* Fixed-point equivalents of kJuliaConstantRe/Im, for
+   IterateEscapeTimeFixed() on the !gHasFPU path. Written as plain
+   integer literals rather than a DoubleToFixed(kJuliaConstantRe)-style
+   macro: that would textually re-expand to a floating-point multiply
+   at every use site, and while a good optimizer would constant-fold
+   two compile-time literals like that down to nothing, relying on
+   Think C actually doing so - rather than genuinely re-running it once
+   per pixel in SampleJulia(), reintroducing exactly the floating point
+   this path exists to avoid - isn't a chance worth taking for two
+   values that never change. -45875 and 17704 are -0.7 and 0.27015
+   each multiplied by 65536.0 and truncated toward zero, matching what
+   (Fixed) casting the double would produce; computed with a script
+   rather than by hand to keep the arithmetic itself trustworthy. */
+#define kJuliaConstantReFixed	((Fixed) -45875)
+#define kJuliaConstantImFixed	((Fixed) 17704)
 
 /* Window title shown while idle, versus while a progressive render is
    under way. "\021" is the Command-key glyph (Mac OS Roman code 0x11,
@@ -185,31 +203,21 @@ void ResetViewForCurrentFractal(void) {
 }
 
 /* MapPixelToComplexPlane()
-   See mwWindow.h. Computed entirely in double so a deeply zoomed-in
-   gView.centreRe/centreIm don't lose precision before the per-pixel
-   offset from them is even added - callers needing a float (the
-   fractal samplers' IterateEscapeTime() calls) narrow the result
-   themselves, right before using it, not here. */
+   See mwWindow.h. A convenience wrapper for mwFractalMath.h's own
+   Prepare/Map pair, for callers (mwZoom.c's marquee, mwSaveAs.c) that
+   only need an occasional one-off mapping and can afford to Prepare
+   fresh every call - unlike SampleMandelbrot()/SampleJulia()'s own
+   per-pixel hot path, which reuses gRenderMappingDouble/Fixed,
+   Prepared once per render (see PrepareRenderMapping()). Always
+   double, regardless of gHasFPU: the marquee only ever runs once per
+   drag, not once per pixel, so there's no case here for Fixed's speed
+   at the cost of its precision. */
 void MapPixelToComplexPlane(short x, short y, double *outRe, double *outIm) {
-	double halfHeightIm = gView.halfWidthRe * (double) windowHeight / (double) windowWidth;
+	FractalMappingDouble mapping;
 	
-	*outRe = gView.centreRe + ((double) (x - windowWidth  / 2) / (windowWidth  / 2.0)) * gView.halfWidthRe;
-	*outIm = gView.centreIm + ((double) (y - windowHeight / 2) / (windowHeight / 2.0)) * halfHeightIm;
+	PrepareFractalMappingDouble(&mapping, &gView, windowWidth, windowHeight);
+	MapPixelToPlaneDouble(&mapping, x, y, outRe, outIm);
 }
-
-/* kMinimumHalfWidthRe: below this, adjacent pixels' cRe/cIm values -
-   computed in double (MapPixelToComplexPlane()) but narrowed to float
-   right before IterateEscapeTime() iterates, for performance - would
-   round to the same float. Typical Mandelbrot/Julia coordinates of
-   interest are order-1 in magnitude, and float holds roughly 7
-   significant decimal digits there; at this project's ~512-pixel
-   width, this floor keeps the per-pixel step comfortably above that
-   precision limit, though "comfortably" is a safety margin chosen for
-   headroom, not an exact derivation of the exact point detail
-   disappears. Going deeper than this would need computing iterations
-   in double, or a perturbation-based approach, to actually resolve
-   further detail - see the comment on FractalView in mwWindow.h. */
-#define kMinimumHalfWidthRe	0.0001
 
 /* MaximumHalfWidthReForCurrentFractal()
    The current fractal's own default halfWidthRe - the ceiling
@@ -228,12 +236,17 @@ static double MaximumHalfWidthReForCurrentFractal(void) {
 }
 
 /* ClampHalfWidthRe()
-   See mwWindow.h. */
+   See mwWindow.h. Picks between mwFractalMath.h's two precision
+   floors by gHasFPU - see their own comment there for why they
+   differ. This is the only place that distinction needs to be made:
+   every other caller (zoom in/out, marquee, FRCT load) reaches its
+   own halfWidthRe only through this function. */
 double ClampHalfWidthRe(double proposedHalfWidthRe) {
 	double maximum = MaximumHalfWidthReForCurrentFractal();
+	double minimum = gHasFPU ? kFractalMinHalfWidthReDouble : kFractalMinHalfWidthReFixed;
 	
-	if (proposedHalfWidthRe < kMinimumHalfWidthRe)
-		return kMinimumHalfWidthRe;
+	if (proposedHalfWidthRe < minimum)
+		return minimum;
 	if (proposedHalfWidthRe > maximum)
 		return maximum;
 	
@@ -395,6 +408,28 @@ typedef short (*FractalSampleProc)(short x, short y);
    meaningful fractalRenderJob.blockSize - at all. */
 static short currentIterationCeiling;
 
+/* gRenderMapping{Double,Fixed} - the pixel-to-plane mapping for
+   whichever fractal is currently rendering, precomputed once per
+   render (PrepareRenderMapping(), called from both
+   StartProgressiveRender() and DrawFractalDirectly()) rather than
+   re-derived per pixel - see mwFractalMath.h's own comment on why
+   this matters. Only the one gHasFPU-selected struct is ever
+   meaningful in a given render; SampleMandelbrot()/SampleJulia()
+   read whichever one applies, exactly as they already dispatch on
+   gHasFPU for everything else. Distinct from MapPixelToComplexPlane()'s
+   own, freshly-Prepared-per-call mapping (mwZoom.c/mwSaveAs.c's
+   occasional use) - these two never need to agree on freshness
+   since each caller Prepares its own. */
+static FractalMappingDouble	gRenderMappingDouble;
+static FractalMappingFixed		gRenderMappingFixed;
+
+static void PrepareRenderMapping(void) {
+	if (gHasFPU)
+		PrepareFractalMappingDouble(&gRenderMappingDouble, &gView, windowWidth, windowHeight);
+	else
+		PrepareFractalMappingFixed(&gRenderMappingFixed, &gView, windowWidth, windowHeight);
+}
+
 /* Progressive render job -------------------------------------------
    Tracks an in-progress coarse-to-fine render so AdvanceFractalRender()
    can pick up where it left off each time it's called. There is only
@@ -444,12 +479,8 @@ static unsigned long lastBlitTick = 0;
 
 static void			BeginRendering(void);
 static void			EndRendering(void);
-static short		IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short maxIterations);
 static short		SampleMandelbrot(short x, short y);
-static Boolean		IsInMainCardioidOrBulb(double cRe, double cIm);
 static short		SampleJulia(short x, short y);
-static short		ShadeLevelForIterationCount(short iterationCount, short maxIterations);
-static void			EnsureLogTableReady(void);
 static RGBColor		ColourForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
 static CTabHandle	BuildFractalColourTable(void);
@@ -566,264 +597,65 @@ static void DrawBranchDirectly(float x1, float y1, float angle, float depth) {
 	}
 }
 
-/* IterateEscapeTime()
-   The z = z^2 + c iteration shared by the Mandelbrot and Julia sets -
-   they differ only in which of z's or c's starting value is the point
-   being tested and which is fixed. Returns the number of iterations
-   completed before |z| escaped past 2, or maxIterations if it never
-   did.
-   
-   Uses float rather than double: at this project's current fixed
-   zoom level, float's ~7 significant decimal digits are far more
-   precision than these constants need, and float arithmetic is
-   cheaper per operation on the target hardware's FPU than double.
-   This needs revisiting before any zoom/pan feature lands - deep
-   zooms are exactly where float's reduced precision starts producing
-   visibly incorrect (blocky) detail - not just made once and
-   forgotten.
-   
-   Includes periodicity checking: a saved (savedRe, savedIm) is
-   compared against the current z on every iteration, and updated at
-   doubling intervals (after 1, 2, 4, 8, ... iterations) - the
-   standard strategy for catching a cycle of any length within a
-   bounded number of comparisons. If z ever returns to exactly the
-   saved value, floating-point arithmetic being deterministic means
-   the sequence has entered a cycle and will iterate forever without
-   escaping, so maxIterations is returned immediately instead of
-   running out the remaining iterations for nothing.
-   
-   This is safe for any point on any escape-time fractal - it proves
-   something about this one point's own trajectory, not an inference
-   about neighbouring points, so unlike boundary-tracing-style
-   optimizations it doesn't depend on the fractal being simply
-   connected (our Julia set, for this project's constant, isn't).
-   Points that do escape are unaffected: they're moving outward and
-   will never return to an earlier value, so the check never fires
-   for them. The benefit is entirely for interior points, which
-   previously always ran the full maxIterations. */
-static short IterateEscapeTime(float zRe, float zIm, float cRe, float cIm, short maxIterations) {
-	short	i;
-	float	savedRe = zRe;
-	float	savedIm = zIm;
-	short	nextSaveAt = 1;
-	
-	for (i = 0; i < maxIterations; i++) {
-		float zReSquared = zRe * zRe;
-		float zImSquared = zIm * zIm;
-		
-		if (zReSquared + zImSquared > 4.0f)
-			break;
-		
-		zIm = 2.0f * zRe * zIm + cIm;
-		zRe = zReSquared - zImSquared + cRe;
-		
-		if (zRe == savedRe && zIm == savedIm) {
-			i = maxIterations;
-			break;
-		}
-		
-		if (i + 1 == nextSaveAt) {
-			savedRe    = zRe;
-			savedIm    = zIm;
-			nextSaveAt *= 2;
-		}
-	}
-	
-	return i;
-}
+/* SampleMandelbrot()/SampleJulia()
+   Map (x,y) through gRenderMappingDouble/Fixed (see PrepareRenderMapping()),
+   dispatching on gHasFPU exactly as the maths itself does - the
+   non-FPU path stays free of floating point from the pixel
+   coordinates onward, not just in the iteration loop. Mandelbrot
+   tests c = the mapped point (z starts at 0, and skips iteration
+   entirely when IsInMainCardioidOrBulb*() already proves it interior);
+   Julia iterates the mapped point as z against its own fixed c.
 
-/* SampleMandelbrot()
-   The point tested is c = (x,y), mapped through gView; z starts at
-   the origin.
-   
-   Folds y to a non-negative distance from the vertical centre - the
-   same fold this used before gView existed - only when
-   gView.centreIm == 0.0: that's the one case where the Mandelbrot
-   set's symmetry about the real axis actually applies to this
-   window's own vertical centre line, which is true today for both
-   fractals' default views (see kMandelbrotDefaultCentreIm/
-   kJuliaDefaultCentreIm) and stays true for any marquee selection
-   that happens to end up centred there too. Once the view pans away
-   from the real axis, a folded y no longer corresponds to the same
-   cIm on both sides of the window's centre, so the general path
-   (MapPixelToComplexPlane(), unfolded) is used instead.
-   
-   This fold is applied wherever it's valid, but it isn't actually a
-   performance win in this per-pixel architecture, despite reading
-   like one: IterateEscapeTime()'s escape count is provably identical
-   for +cIm and -cIm (Mandelbrot's symmetry means the whole iterated
-   sequence mirrors exactly, escape included) - confirmed empirically
-   across 20,000 random points with zero mismatches, including the
-   periodicity check. An earlier version of this comment claimed
-   removing the fold roughly doubled the per-pixel cost; that was
-   wrong, caught on working through the actual algorithm rather than
-   assuming - iterating with a signed cIm costs exactly what iterating
-   with its folded, non-negative counterpart does. It's restored here
-   because it's harmless and matches how this always worked before
-   gView existed, not because of a speed difference that turns out not
-   to exist.
-   
-   IterateEscapeTime() runs against currentIterationCeiling (see
-   UpdateIterationCeilingForBlockSize()), the cheaper, reduced budget
-   coarse preview passes use - but ShadeLevelForIterationCount() always
-   normalizes against the real kMandelbrotMaxIterations, not that
-   reduced value. Normalizing against whatever ceiling actually ran
-   was tried first, and produced wildly different colours pass to
-   pass for the same underlying point - real testing showed this
-   plainly, since log-scaling the same iteration count against a
-   ceiling of 8 versus 64 gives very different results. Always
-   normalizing against the true ceiling keeps colours stable across
-   passes: a point that hits the reduced cap early is treated as if it
-   had genuinely escaped at that count against the real scale - an
-   approximation for the preview, but the same approximation every
-   time, rather than one that shifts as the ceiling grows. */
-
-/* IsInMainCardioidOrBulb()
-   Closed-form check for the Mandelbrot set's two largest interior
-   regions - the main cardioid and the period-2 bulb tangent to it -
-   so SampleMandelbrot() can skip IterateEscapeTime() entirely for
-   points already known to never escape, rather than iterating them
-   all the way to whatever the current ceiling is. Together these two
-   regions cover most of the set's own interior area, and any view
-   that includes much of the traditional "whole set" framing - the
-   default view among them - spends a large fraction of its pixels
-   here, so this is worth checking before falling back to iteration,
-   not after.
-   
-   Cheaper than periodicity checking (IterateEscapeTime()'s own
-   doubling-interval cycle detection) for exactly these two regions
-   specifically: periodicity checking still has to run a real
-   iteration sequence until a cycle is actually detected, where this
-   is a handful of multiplications and comparisons with no iteration
-   at all. It doesn't replace periodicity checking generally - only
-   these two regions have simple closed-form tests; the infinitely
-   many smaller bulbs tangent to the cardioid don't, and still rely on
-   it (see IterateEscapeTime()'s own comment).
-   
-   Formulas: a point c = cRe + cIm*i lies in the main cardioid if
-   q*(q + (cRe - 0.25)) <= 0.25*cIm² where q = (cRe - 0.25)² + cIm²;
-   and in the period-2 bulb if (cRe + 1)² + cIm² <= 0.0625 (a circle
-   of radius 1/4 centred at -1). Both are standard, independently
-   documented results (e.g. Wikipedia's own Mandelbrot set article,
-   which lists this exact optimisation) - not derived here. */
-static Boolean IsInMainCardioidOrBulb(double cRe, double cIm) {
-	double q = (cRe - 0.25) * (cRe - 0.25) + cIm * cIm;
-	
-	if (q * (q + (cRe - 0.25)) <= 0.25 * cIm * cIm)
-		return true;
-	
-	if ((cRe + 1.0) * (cRe + 1.0) + cIm * cIm <= 0.0625)
-		return true;
-	
-	return false;
-}
-
+   Both run against currentIterationCeiling - the cheaper, reduced
+   budget a coarse preview pass uses - but always shade against the
+   fractal's real maxIterations, not that reduced value: normalising
+   against whatever ceiling actually ran was tried first, and produced
+   visibly different colours pass to pass for the same point (log-
+   scaling the same count against a ceiling of 8 versus 64 gives very
+   different results); the true ceiling keeps colours stable as a
+   render refines. */
 static short SampleMandelbrot(short x, short y) {
-	double	dRe, dIm;
 	short	iterationCount;
 	
-	if (gView.centreIm == 0.0) {
-		double	halfHeightIm = gView.halfWidthRe * (double) windowHeight / (double) windowWidth;
-		short	verticalDistanceFromCentre = y - windowHeight / 2;
+	if (gHasFPU) {
+		double	dRe, dIm;
 		
-		if (verticalDistanceFromCentre < 0)
-			verticalDistanceFromCentre = -verticalDistanceFromCentre;
+		MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &dRe, &dIm);
 		
-		dRe = gView.centreRe + ((double) (x - windowWidth / 2) / (windowWidth / 2.0)) * gView.halfWidthRe;
-		dIm = ((double) verticalDistanceFromCentre / (windowHeight / 2.0)) * halfHeightIm;
+		if (IsInMainCardioidOrBulb(dRe, dIm))
+			iterationCount = currentIterationCeiling;
+		else
+			iterationCount = IterateEscapeTimeDouble(0.0, 0.0, dRe, dIm, currentIterationCeiling);
 	} else {
-		MapPixelToComplexPlane(x, y, &dRe, &dIm);
-	}
-	
-	if (IsInMainCardioidOrBulb(dRe, dIm)) {
-		iterationCount = currentIterationCeiling;
-	} else {
-		iterationCount = IterateEscapeTime(0.0f, 0.0f, (float) dRe, (float) dIm, currentIterationCeiling);
+		Fixed	fRe, fIm;
+		
+		MapPixelToPlaneFixed(&gRenderMappingFixed, x, y, &fRe, &fIm);
+		
+		if (IsInMainCardioidOrBulbFixed(fRe, fIm))
+			iterationCount = currentIterationCeiling;
+		else
+			iterationCount = IterateEscapeTimeFixed(0, 0, fRe, fIm, currentIterationCeiling);
 	}
 	
 	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
 }
 
-/* SampleJulia()
-   The point tested is z's starting value, mapped through gView; c is
-   the fixed constant that shapes the Julia set. See SampleMandelbrot()
-   above for why IterateEscapeTime() reads currentIterationCeiling but
-   ShadeLevelForIterationCount() always normalizes against the real
-   kJuliaMaxIterations instead. */
 static short SampleJulia(short x, short y) {
-	double	dRe, dIm;
 	short	iterationCount;
 	
-	MapPixelToComplexPlane(x, y, &dRe, &dIm);
-	
-	iterationCount = IterateEscapeTime((float) dRe, (float) dIm, kJuliaConstantRe, kJuliaConstantIm, currentIterationCeiling);
+	if (gHasFPU) {
+		double	dRe, dIm;
+		
+		MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &dRe, &dIm);
+		iterationCount = IterateEscapeTimeDouble(dRe, dIm, kJuliaConstantRe, kJuliaConstantIm, currentIterationCeiling);
+	} else {
+		Fixed	fRe, fIm;
+		
+		MapPixelToPlaneFixed(&gRenderMappingFixed, x, y, &fRe, &fIm);
+		iterationCount = IterateEscapeTimeFixed(fRe, fIm, kJuliaConstantReFixed, kJuliaConstantImFixed, currentIterationCeiling);
+	}
 	
 	return ShadeLevelForIterationCount(iterationCount, kJuliaMaxIterations);
-}
-
-/* ShadeLevelForIterationCount()
-   Maps a fractal's raw iteration count onto the shared kShadingScale
-   range using a log curve rather than a straight linear one. Escape
-   times are heavily skewed toward small counts - most exterior points
-   escape almost immediately - so a linear map spends nearly its whole
-   range on iteration counts almost no pixel ever reaches, leaving the
-   overwhelming majority of the exterior indistinguishable from the
-   erased white background. The log curve spreads colour across the
-   counts pixels actually land in instead. Each fractal is mapped
-   against its own maxIterations, rather than being rescaled onto
-   another fractal's scale first, so this one function replaces both
-   the old direct (Mandelbrot) and rescaled (Julia) linear mappings. */
-/* kLogPlusOneTable[]/EnsureLogTableReady()
-   ShadeLevelForIterationCount()'s log-scale formula needs log(n+1)
-   for two different n each call: iterationCount (0..maxIterations,
-   genuinely different every call - this is what makes the curve a
-   curve) and maxIterations itself (always one of exactly two values
-   in this whole codebase - kMandelbrotMaxIterations or
-   kJuliaMaxIterations - recomputing the *same* result every single
-   call). log() is a transcendental function; on hardware with no FPU
-   (this project's stated minimum, a Mac Plus) it runs through SANE's
-   software floating-point library, meaningfully slower per call than
-   + / - / * / / - and unlike the escape-time optimisations elsewhere here,
-   this call runs for every single sample regardless of what's being
-   viewed, since every pixel needs a shade level whether it escaped
-   in 2 iterations or 2000.
-   
-   Precomputing log(i+1) for every i this codebase could ever ask for
-   - 0 through kJuliaMaxIterations, the larger of the two ceilings -
-   turns both of ShadeLevelForIterationCount()'s log() calls into
-   plain array reads. float, not double: the result only ever feeds a
-   0..kShadingScale shade level, so float's precision is already far
-   more than enough, and it halves the table's size for no loss that
-   matters here. Built once, lazily, on first use - log() itself
-   never needs to run again after that for the rest of the run. */
-#define kLogTableSize	(kJuliaMaxIterations + 1)
-
-static float	kLogPlusOneTable[kLogTableSize];
-static Boolean	gLogTableReady = false;
-
-static void EnsureLogTableReady(void) {
-	short i;
-	
-	if (gLogTableReady)
-		return;
-	
-	for (i = 0; i < kLogTableSize; i++)
-		kLogPlusOneTable[i] = (float) log((double) i + 1.0);
-	
-	gLogTableReady = true;
-}
-
-static short ShadeLevelForIterationCount(short iterationCount, short maxIterations) {
-	double shadeLevel;
-	
-	EnsureLogTableReady();
-	
-	shadeLevel = kShadingScale * (double) kLogPlusOneTable[iterationCount] / (double) kLogPlusOneTable[maxIterations];
-	
-	if (shadeLevel > kShadingScale)
-		shadeLevel = kShadingScale;
-	
-	return (short) shadeLevel;
 }
 
 /* The colour ramp shadeLevel is mapped onto, in the same direction as
@@ -1359,6 +1191,7 @@ static void DrawFractalDirectly(void) {
 		short x, y;
 		
 		currentIterationCeiling = (width == 2) ? kMandelbrotMaxIterations : kJuliaMaxIterations;
+		PrepareRenderMapping();
 		
 		for (y = 0; y < windowHeight; y += step) {
 			for (x = 0; x < windowWidth; x += step) {
@@ -1788,6 +1621,7 @@ static void StartProgressiveRender(FractalSampleProc sampleProc) {
 	fractalRenderJob.rowCount        = BlocksAcross(imageHeight, fractalRenderJob.blockSize);
 	fractalRenderJob.nextBlockIndex  = 0;
 	UpdateIterationCeilingForBlockSize(fractalRenderJob.blockSize);
+	PrepareRenderMapping();
 	BeginRendering();
 }
 

@@ -4,6 +4,8 @@
  *		Public interfaces for mwWindow.c
  *
  *****/
+#ifndef _mwWindow_
+#define _mwWindow_
 
 void DrawContent (short active);
 void SetUpWindow(void);
@@ -22,23 +24,18 @@ void AbortFractalRender(void);
 void HandleWindowResized(short newWidth, short newHeight);
 
 /* The visible region of the complex plane Mandelbrot and Julia render
-   against - centreRe/centreIm is the middle of the view, halfWidthRe
-   is half its width (so the full visible Re range is centreRe ±
-   halfWidthRe); the visible Im range follows from halfWidthRe scaled
-   by the window's own aspect ratio, so the view is never distorted
-   regardless of how far in gView is zoomed.
+   against - centreRe/centreIm is the view's middle, halfWidthRe half
+   its width (visible Re range is centreRe ± halfWidthRe); the visible
+   Im range follows from halfWidthRe scaled by the window's aspect
+   ratio, so the view is never distorted regardless of zoom.
    
-   double, not float: gView.centreRe/centreIm need to keep meaningful
-   precision even once halfWidthRe has shrunk very small from repeated
-   zooming, which float's ~7 significant digits can't hold onto for
-   long. The per-pixel iteration loop (IterateEscapeTime(), in
-   mwWindow.c) still narrows to float right before iterating, for
-   performance - so this extends how far a zoom can go before that
-   narrowing starts to show as visible banding in the finest detail,
-   but doesn't remove the limit entirely. Going further than that
-   would need computing iterations in double (or a perturbation-based
-   approach for arbitrary depth), which is a substantially bigger
-   change than parameterising the viewport. */
+   double, not float: needs to keep meaningful precision once
+   halfWidthRe has shrunk small from repeated zooming. How far it can
+   actually shrink depends on gHasFPU (mwWindow.c) - see
+   kFractalMinHalfWidthReDouble/Fixed (mwFractalMath.h), the two
+   floors ClampHalfWidthRe() enforces. Going deeper on the gHasFPU
+   path would need a perturbation-based approach for arbitrary depth,
+   well beyond parameterising the viewport. */
 typedef struct {
 	double	centreRe;
 	double	centreIm;
@@ -56,21 +53,25 @@ extern FractalView gView;
    all - it just does nothing observable. */
 void ResetViewForCurrentFractal(void);
 
-/* Converts a pixel position into the point in the complex plane it
-   corresponds to, according to gView. Shared by SampleMandelbrot()/
-   SampleJulia() (mwWindow.c) and the marquee zoom feature (mwZoom.c),
-   both of which need exactly this mapping - the fractal samplers to
-   know what to iterate, the marquee to know which region of the
-   complex plane a dragged selection rectangle corresponds to. */
+/* A convenience one-off pixel-to-plane mapping, always in double
+   regardless of gHasFPU - for callers that map occasionally (the
+   marquee zoom feature, mwZoom.c; loading a saved view, mwSaveAs.c)
+   rather than once per pixel. SampleMandelbrot()/SampleJulia()
+   (mwWindow.c) don't use this for their own per-pixel hot path - see
+   PrepareRenderMapping() there, and mwFractalMath.h's
+   FractalMappingDouble/Fixed - since re-Preparing on every pixel
+   would reintroduce exactly the per-call cost precomputing exists to
+   avoid. */
 void MapPixelToComplexPlane(short x, short y, double *outRe, double *outIm);
 
 /* Clamps a proposed gView.halfWidthRe to a sensible range for the
-   current fractal: a floor low enough to avoid float-precision
-   collapse in IterateEscapeTime()'s per-pixel iteration (mwWindow.c),
-   and a ceiling matching the current fractal's own default view, so
-   repeated zooming out can't show an ever-larger, meaningless region.
-   Used by both the marquee zoom feature's candidate view and keyboard
-   zoom (+/-) - see mwZoom.c. */
+   current fractal: a floor low enough to avoid precision collapse in
+   the per-pixel iteration (mwWindow.c) - which floor depends on
+   gHasFPU, see FractalView's own comment above - and a ceiling
+   matching the current fractal's own default view, so repeated
+   zooming out can't show an ever-larger, meaningless region. Used by
+   both the marquee zoom feature's candidate view and keyboard zoom
+   (+/-) - see mwZoom.c. */
 double ClampHalfWidthRe(double proposedHalfWidthRe);
 
 /* Read-only access to render state, for the Get Info window (mwInfo.c). */
@@ -250,3 +251,5 @@ void SetCurrentPalette(short paletteIndex);
    normal RenderFractalOffscreen() in that case. Doesn't touch gView
    itself; call ResetViewForCurrentFractal() first. */
 Boolean RestoreDefaultViewFromCache(void);
+
+#endif	/* _mwWindow_ */

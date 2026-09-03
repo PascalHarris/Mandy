@@ -17,6 +17,7 @@ extern	WindowPtr	mwWindow;
 extern	Rect		dragRect;
 
 Boolean	gHasColourQD;
+Boolean	gHasFPU;
 
 /* Arrow key character codes - the low byte of a keyDown/autoKey
    event's message field when the key pressed is an arrow key, with no
@@ -36,6 +37,7 @@ void InitMacintosh(void);
 void HandleMouseDown (EventRecord	*theEvent);
 void HandleEvent(void);
 static Boolean HasColourQuickDraw(void);
+static Boolean HasFPU(void);
 
 /* InitMacintosh()
    Initialize all the managers & memory */
@@ -52,6 +54,7 @@ void InitMacintosh(void) {
     InitCursor();
     
     gHasColourQD = HasColourQuickDraw();
+    gHasFPU      = HasFPU();
 }
 
 /* HasColourQuickDraw()
@@ -86,6 +89,34 @@ static Boolean HasColourQuickDraw(void) {
         if (SysEnvirons(1, &environment) == noErr)
             return environment.hasColorQD;
     }
+    
+    return false;
+}
+
+/* HasFPU()
+   Checks for a real 68881/68882/68040 FPU via gestaltFPUType, per
+   Apple's own explicit guidance that no CPU generation should be
+   assumed to imply - or lack - one: some 68020/68030 Macs (the IIsi
+   among them) shipped with the FPU as an optional, user-installed
+   part, so a conditional branch to floating-point code must check
+   this directly rather than infer it from the processor type.
+   
+   Chooses between two entirely different numeric representations for
+   the fractal iteration loop - see mwFractalMath.c's IterateEscapeTimeDouble()
+   (double, for real hardware floating point) and
+   IterateEscapeTimeFixed() (fixed-point, avoiding SANE's software
+   floating-point emulation on this project's stated minimum target,
+   a Mac Plus, entirely).
+   
+   Defaults to false (no FPU) if Gestalt itself is unavailable - a
+   pre-Gestalt, System 6.0.4-or-earlier machine, vanishingly rare in
+   practice, and, if it exists, no worse served by the fixed-point
+   path than a real 68000 already is. */
+static Boolean HasFPU(void) {
+    long fpuType;
+    
+    if (Gestalt(gestaltFPUType, &fpuType) == noErr)
+        return fpuType != gestaltNoFPU;
     
     return false;
 }
