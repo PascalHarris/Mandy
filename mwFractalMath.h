@@ -16,7 +16,7 @@
 #include <Quickdraw.h>	/* Boolean - see mwWindow.c's own include order, which this matches */
 #endif
 #ifndef _FixMath_
-#include <FixMath.h>	/* Fixed, FixMul */
+#include <FixMath.h>	/* Fixed - FixMul() itself is no longer called anywhere in this project (see FixedMultiply()), but its header still defines the Fixed type this whole file depends on */
 #endif
 #include "mwWindow.h"	/* FractalView */
 
@@ -31,6 +31,56 @@
    violation, flagged here rather than silently accepted. */
 short IterateEscapeTimeDouble(double zRe, double zIm, double cRe, double cIm, short maxIterations);
 short IterateEscapeTimeFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short maxIterations);
+
+/* A drop-in, trap-free replacement for the Toolbox's FixMul() - see
+   FixedComputeSquaresAndCross() in mwFractalMath.c for the full
+   derivation (this shares its arithmetic) and why it matters on real
+   68000 hardware specifically. Verified against an exact 64-bit
+   reference across the full 32-bit signed range, including every
+   sign combination and both overflow extremes, before relying on it
+   anywhere - a first version's sign handling was subtly wrong, caught
+   only by that comparison, not by inspection. */
+Fixed FixedMultiply(Fixed a, Fixed b);
+
+/* Burning Ship: |Re(z)|, |Im(z)| before squaring, every iteration -
+   z's real and imaginary parts are folded onto the positive axes
+   before z^2+c runs as normal. Tricorn (Mandelbar): the complex
+   conjugate of z before squaring, every iteration - equivalent to
+   negating z's imaginary part first. Both are Mandelbrot-shaped (c
+   varies per pixel, z starts at 0) rather than Julia-shaped, and
+   neither is safe to combine with IsInMainCardioidOrBulb()/Fixed() -
+   those closed-form tests describe the plain Mandelbrot set's own
+   two interior regions specifically, not these differently-shaped
+   sets, so a caller must not skip iteration on the strength of them
+   here. Both still carry the same periodicity check as the plain
+   iteration - that's a property of any deterministic z |-> f(z)+c
+   trajectory, not particular to which f(). */
+short IterateBurningShipDouble(double zRe, double zIm, double cRe, double cIm, short maxIterations);
+short IterateBurningShipFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short maxIterations);
+short IterateTricornDouble(double zRe, double zIm, double cRe, double cIm, short maxIterations);
+short IterateTricornFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short maxIterations);
+
+/* Multibrot: z^power + c rather than z^2+c, power a small positive
+   integer (>=2) fixed per call, not a per-pixel variable - see the
+   .c file for why a plain repeated-multiply loop rather than the
+   3-multiply trick is used here, and why the same |z|>2 bailout the
+   quadratic case uses is still safe (if not the tightest possible
+   bound) for any power. Also Mandelbrot-shaped, not Julia-shaped, and
+   not compatible with IsInMainCardioidOrBulb()/Fixed() for the same
+   reason as Burning Ship/Tricorn above - those describe power 2's set
+   specifically. */
+short IterateMultibrotDouble(double zRe, double zIm, double cRe, double cIm, short power, short maxIterations);
+short IterateMultibrotFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short power, short maxIterations);
+
+/* Phoenix (Ushiki, 1988): z^2 + c + p*zPrev, p fixed at the classic
+   value -0.5 - see the .c file's own, longer comment, in particular
+   for why the periodicity check inside these two has to compare more
+   state than every other iteration function here does. Mandelbrot-
+   shaped (c varies per pixel, z and zPrev both start at 0), so the
+   same IsInMainCardioidOrBulb()/Fixed() caution as Burning Ship/
+   Tricorn/Multibrot applies. */
+short IteratePhoenixDouble(double zRe, double zIm, double cRe, double cIm, short maxIterations);
+short IteratePhoenixFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short maxIterations);
 
 /* Closed-form interior tests for the Mandelbrot set's main cardioid
    and period-2 bulb - skip iteration entirely for a c already known

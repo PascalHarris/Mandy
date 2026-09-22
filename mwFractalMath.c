@@ -85,6 +85,43 @@ static void SplitUnsignedHalves(Fixed value, unsigned short *high, unsigned shor
 	*low      = (unsigned short) (magnitude & 0xFFFF);
 }
 
+/* FixedMultiply()
+   See mwFractalMath.h - the general-purpose replacement for FixMul().
+   Shares its derivation with FixedComputeSquaresAndCross()'s cross
+   term below, which is this same computation inline (kept inline
+   there rather than calling this function, to avoid a fourth
+   FixedComputeSquaresAndCross()-internal call for what's already the
+   hottest code in the non-FPU path - see that function's own comment
+   for the full derivation, the rounding-mode pitfall, and the word-
+   multiply count). This standalone version exists for every other
+   caller that needs a correct, trap-free Fixed multiply of two
+   genuinely different values with no squaring shortcut available -
+   Multibrot's repeated multiplication (IterateMultibrotFixed()) and
+   IsInMainCardioidOrBulbFixed() among them. */
+Fixed FixedMultiply(Fixed a, Fixed b) {
+	unsigned short	aHigh, aLow, bHigh, bLow;
+	Boolean			aNegative, bNegative;
+	unsigned long	hh, hl, lh, ll, magnitude;
+	
+	SplitUnsignedHalves(a, &aHigh, &aLow, &aNegative);
+	SplitUnsignedHalves(b, &bHigh, &bLow, &bNegative);
+	
+	hh = (unsigned long) aHigh * bHigh;
+	hl = (unsigned long) aHigh * bLow;
+	lh = (unsigned long) aLow  * bHigh;
+	ll = (unsigned long) aLow  * bLow;
+	
+	magnitude = (hh << 16) + hl + lh + (ll >> 16);
+	
+	if (aNegative != bNegative) {
+		if ((ll & 0xFFFF) != 0)
+			magnitude += 1;		/* round the magnitude up first, so negating rounds the signed result down - see FixedComputeSquaresAndCross()'s own comment for why */
+		return -(Fixed) magnitude;
+	}
+	
+	return (Fixed) magnitude;
+}
+
 /* FixedComputeSquaresAndCross()
    zRe*zRe, zIm*zIm, and zRe*zIm together - exactly what
    IterateEscapeTimeFixed() needs every iteration. FixMul() would get
@@ -131,10 +168,12 @@ static void SplitUnsignedHalves(Fixed value, unsigned short *high, unsigned shor
    that case. crossLL's own low 16 bits are exactly the true product's
    remainder mod 65536 (every other term here is already an exact
    multiple of 65536), so that's what decides whether the magnitude
-   needs bumping up by one before negating. Total: 10 word-multiplies
-   for all three values together, against 16 if each were a separate
-   general FixMul()-equivalent multiply (4 apiece) - on top of
-   removing all three trap calls. */
+   needs bumping up by one before negating - the same fix
+   FixedMultiply() above applies, inlined here instead of called, for
+   exactly this function's own reason for existing (see its own
+   comment). Total: 10 word-multiplies for all three values together,
+   against 16 if each were a separate general FixMul()-equivalent
+   multiply (4 apiece) - on top of removing all three trap calls. */
 static void FixedComputeSquaresAndCross(Fixed zRe, Fixed zIm, Fixed *outReSquared, Fixed *outImSquared, Fixed *outCross) {
 	unsigned short	reHigh, reLow, imHigh, imLow;
 	Boolean			reNegative, imNegative;
@@ -201,6 +240,382 @@ short IterateEscapeTimeFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short m
 	return i;
 }
 
+/* AbsFixed()
+   |value|, safe for every 32-bit signed input including the most
+   negative one - same unsigned-subtraction trick as
+   SplitUnsignedHalves() uses, for the same reason: computing -value
+   directly in signed arithmetic overflows undefined behaviour at
+   exactly that one input, and this project's own escape-time bound
+   already means it never actually arises here, but there's no reason
+   to rely on that when the safe form costs nothing extra. */
+static Fixed AbsFixed(Fixed value) {
+	if (value >= 0)
+		return value;
+	return (Fixed) ((unsigned long) 0 - (unsigned long) value);
+}
+
+/* IterateBurningShipDouble()/Fixed()
+   z's real and imaginary parts folded onto the positive axes before
+   z^2+c runs as normal, every iteration. Squaring already discards
+   sign, so the two squares are completely unchanged from the plain
+   iteration above - the only thing that actually differs is the
+   cross term feeding zIm's update, which must be forced non-negative:
+   2*|zRe|*|zIm| == 2*|zRe*zIm|, so taking the absolute value of the
+   already-computed cross product is both correct and cheaper than
+   computing |zRe| and |zIm| separately first and multiplying those.
+   Not safe to combine with IsInMainCardioidOrBulb()/Fixed() - see
+   mwFractalMath.h for why. */
+short IterateBurningShipDouble(double zRe, double zIm, double cRe, double cIm, short maxIterations) {
+	short	i;
+	double	savedRe = zRe;
+	double	savedIm = zIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		double zReSquared = zRe * zRe;
+		double zImSquared = zIm * zIm;
+		
+		if (zReSquared + zImSquared > 4.0)
+			break;
+		
+		zIm = 2.0 * fabs(zRe * zIm) + cIm;
+		zRe = zReSquared - zImSquared + cRe;
+		
+		if (zRe == savedRe && zIm == savedIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe    = zRe;
+			savedIm    = zIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
+short IterateBurningShipFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short maxIterations) {
+	short	i;
+	Fixed	savedRe = zRe;
+	Fixed	savedIm = zIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		Fixed zReSquared, zImSquared, zReTimesZIm;
+		
+		FixedComputeSquaresAndCross(zRe, zIm, &zReSquared, &zImSquared, &zReTimesZIm);
+		
+		if (zReSquared + zImSquared > kFixedFour)
+			break;
+		
+		zIm = 2 * AbsFixed(zReTimesZIm) + cIm;
+		zRe = zReSquared - zImSquared + cRe;
+		
+		if (zRe == savedRe && zIm == savedIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe    = zRe;
+			savedIm    = zIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
+/* IterateTricornDouble()/Fixed()
+   z's complex conjugate before squaring, every iteration. Negating
+   zIm before squaring leaves the real part's update completely
+   unchanged (squaring discards the sign either way), so - like
+   Burning Ship above - only the cross term feeding zIm's update
+   differs: 2*zRe*(-zIm) == -2*zRe*zIm, a plain sign flip on the
+   already-computed cross product. */
+short IterateTricornDouble(double zRe, double zIm, double cRe, double cIm, short maxIterations) {
+	short	i;
+	double	savedRe = zRe;
+	double	savedIm = zIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		double zReSquared = zRe * zRe;
+		double zImSquared = zIm * zIm;
+		
+		if (zReSquared + zImSquared > 4.0)
+			break;
+		
+		zIm = -2.0 * zRe * zIm + cIm;
+		zRe = zReSquared - zImSquared + cRe;
+		
+		if (zRe == savedRe && zIm == savedIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe    = zRe;
+			savedIm    = zIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
+short IterateTricornFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short maxIterations) {
+	short	i;
+	Fixed	savedRe = zRe;
+	Fixed	savedIm = zIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		Fixed zReSquared, zImSquared, zReTimesZIm;
+		
+		FixedComputeSquaresAndCross(zRe, zIm, &zReSquared, &zImSquared, &zReTimesZIm);
+		
+		if (zReSquared + zImSquared > kFixedFour)
+			break;
+		
+		zIm = -2 * zReTimesZIm + cIm;
+		zRe = zReSquared - zImSquared + cRe;
+		
+		if (zRe == savedRe && zIm == savedIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe    = zRe;
+			savedIm    = zIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
+/* IterateMultibrotDouble()/Fixed()
+   z^power + c rather than z^2+c. Unlike the quadratic case above,
+   there's no fixed-multiply-count trick for a general integer power -
+   this just repeatedly multiplies z by itself power-1 times every
+   iteration, a plain O(power) loop rather than fast exponentiation by
+   squaring, since power is always small here (this project only ever
+   offers 3-5) and repeated multiplication is simpler and no slower in
+   practice at that size.
+
+   |z|>2 (the same bailout the quadratic case uses) is still a safe
+   bound for any power>=2: the standard result for z->z^power+c is
+   that |z| > max(|c|, 2^(1/(power-1))) guarantees escape, and
+   2^(1/(power-1)) <= 2 for every power>=2 (exactly 2 at power=2,
+   shrinking toward 1 as power grows) - so the fixed threshold of 2
+   this project's quadratic fractals already use is a valid, if not
+   the tightest possible, bailout for every power this function is
+   ever called with.
+
+   Not safe to combine with IsInMainCardioidOrBulb()/Fixed() - those
+   describe power 2's set specifically. Verified (both the shape of
+   this loop and the Fixed path's arithmetic) against a double-
+   precision reference across powers 2-6 before relying on it. */
+short IterateMultibrotDouble(double zRe, double zIm, double cRe, double cIm, short power, short maxIterations) {
+	short	i;
+	double	savedRe = zRe;
+	double	savedIm = zIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		double	powerRe = zRe;
+		double	powerIm = zIm;
+		short	k;
+		
+		if (zRe * zRe + zIm * zIm > 4.0)
+			break;
+		
+		for (k = 1; k < power; k++) {
+			double newRe = powerRe * zRe - powerIm * zIm;
+			double newIm = powerRe * zIm + powerIm * zRe;
+			powerRe = newRe;
+			powerIm = newIm;
+		}
+		
+		zRe = powerRe + cRe;
+		zIm = powerIm + cIm;
+		
+		if (zRe == savedRe && zIm == savedIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe    = zRe;
+			savedIm    = zIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
+short IterateMultibrotFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short power, short maxIterations) {
+	short	i;
+	Fixed	savedRe = zRe;
+	Fixed	savedIm = zIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		Fixed	powerRe = zRe;
+		Fixed	powerIm = zIm;
+		short	k;
+		
+		if (FixedMultiply(zRe, zRe) + FixedMultiply(zIm, zIm) > kFixedFour)
+			break;
+		
+		for (k = 1; k < power; k++) {
+			Fixed newRe = FixedMultiply(powerRe, zRe) - FixedMultiply(powerIm, zIm);
+			Fixed newIm = FixedMultiply(powerRe, zIm) + FixedMultiply(powerIm, zRe);
+			powerRe = newRe;
+			powerIm = newIm;
+		}
+		
+		zRe = powerRe + cRe;
+		zIm = powerIm + cIm;
+		
+		if (zRe == savedRe && zIm == savedIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe    = zRe;
+			savedIm    = zIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
+/* kPhoenixP/Fixed: Ushiki's own classic parameter, p=-0.5 (real) - see
+   IteratePhoenixDouble()/Fixed()'s own comment. */
+#define kPhoenixP		(-0.5)
+#define kPhoenixPFixed	(-(((Fixed) 1 << 16) / 2))
+
+/* IteratePhoenixDouble()/Fixed()
+   z |-> z^2 + c + p*zPrev, zPrev |-> whichever z that replaces - the
+   Phoenix fractal (Shigehiro Ushiki, 1988): a Mandelbrot-shaped
+   iteration with a memory term added, feeding back the PREVIOUS
+   iterate as well as the current one. c varies per pixel and both z
+   and zPrev start at 0, exactly like this project's other Mandelbrot-
+   shaped types (Mandelbrot, Burning Ship, Tricorn, Multibrot); p is
+   fixed at Ushiki's own classic value, not a per-pixel or user-
+   configurable one, the same way Julia's own constant is fixed rather
+   than exposed. Escape check and bailout radius are the same |z|>2 the
+   quadratic case uses - the memory term doesn't change that a large
+   enough |z| still escapes. Not safe to combine with
+   IsInMainCardioidOrBulb()/Fixed() - like Burning Ship/Tricorn/
+   Multibrot, this describes a differently-shaped set.
+
+   The periodicity check here compares the FULL two-value state (z AND
+   zPrev together), not just z the way every other iteration in this
+   file does. Phoenix's recurrence is second-order - the next z depends
+   on both the current z and the current zPrev - so two trajectories
+   that happen to agree on z but disagree on zPrev are not guaranteed
+   to continue identically the way a first-order escape-time
+   trajectory's periodicity check can assume. Comparing only z here
+   would risk falsely declaring a cycle, and cutting the iteration
+   short, for a point that would actually have continued differently.
+
+   p*zPrev is a real-scalar multiple of a complex number (p has no
+   imaginary part), not a general complex multiply - cheaper than the
+   general form either representation would otherwise need. Fixed uses
+   the already-verified FixedMultiply() for it rather than a hand-
+   rolled shift-based halving: p being exactly -0.5 would make that
+   shift exact in principle, but working it out correctly would need
+   its own floor-vs-truncate rounding analysis, the same kind
+   FixedComputeSquaresAndCross()'s cross term once got wrong - not
+   worth reintroducing that risk to save two calls to a primitive
+   that's already fast and already correct. */
+short IteratePhoenixDouble(double zRe, double zIm, double cRe, double cIm, short maxIterations) {
+	short	i;
+	double	zPrevRe = 0.0, zPrevIm = 0.0;
+	double	savedRe = zRe, savedIm = zIm, savedPrevRe = zPrevRe, savedPrevIm = zPrevIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		double zReSquared = zRe * zRe;
+		double zImSquared = zIm * zIm;
+		double newRe, newIm;
+		
+		if (zReSquared + zImSquared > 4.0)
+			break;
+		
+		newRe = zReSquared - zImSquared + cRe + kPhoenixP * zPrevRe;
+		newIm = 2.0 * zRe * zIm + cIm + kPhoenixP * zPrevIm;
+		
+		zPrevRe = zRe;
+		zPrevIm = zIm;
+		zRe = newRe;
+		zIm = newIm;
+		
+		if (zRe == savedRe && zIm == savedIm && zPrevRe == savedPrevRe && zPrevIm == savedPrevIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe     = zRe;
+			savedIm     = zIm;
+			savedPrevRe = zPrevRe;
+			savedPrevIm = zPrevIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
+short IteratePhoenixFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short maxIterations) {
+	short	i;
+	Fixed	zPrevRe = 0, zPrevIm = 0;
+	Fixed	savedRe = zRe, savedIm = zIm, savedPrevRe = zPrevRe, savedPrevIm = zPrevIm;
+	short	nextSaveAt = 1;
+	
+	for (i = 0; i < maxIterations; i++) {
+		Fixed zReSquared, zImSquared, zReTimesZIm, newRe, newIm;
+		
+		FixedComputeSquaresAndCross(zRe, zIm, &zReSquared, &zImSquared, &zReTimesZIm);
+		
+		if (zReSquared + zImSquared > kFixedFour)
+			break;
+		
+		newRe = zReSquared - zImSquared + cRe + FixedMultiply(kPhoenixPFixed, zPrevRe);
+		newIm = 2 * zReTimesZIm + cIm + FixedMultiply(kPhoenixPFixed, zPrevIm);
+		
+		zPrevRe = zRe;
+		zPrevIm = zIm;
+		zRe = newRe;
+		zIm = newIm;
+		
+		if (zRe == savedRe && zIm == savedIm && zPrevRe == savedPrevRe && zPrevIm == savedPrevIm) {
+			i = maxIterations;
+			break;
+		}
+		
+		if (i + 1 == nextSaveAt) {
+			savedRe     = zRe;
+			savedIm     = zIm;
+			savedPrevRe = zPrevRe;
+			savedPrevIm = zPrevIm;
+			nextSaveAt *= 2;
+		}
+	}
+	
+	return i;
+}
+
 /* IsInMainCardioidOrBulb()/Fixed()
    c = cRe + cIm*i lies in the main cardioid if q*(q + (cRe-0.25)) <=
    0.25*cIm^2 where q = (cRe-0.25)^2 + cIm^2; in the period-2 bulb if
@@ -220,7 +635,11 @@ short IterateEscapeTimeFixed(Fixed zRe, Fixed zIm, Fixed cRe, Fixed cIm, short m
    Fixed's bounds: cRe/cIm are themselves bounded to roughly ±2 for
    any view this project's zoom limits allow, and every intermediate
    value here stays far under Fixed's ±32767 range - no overflow risk
-   at any step. */
+   at any step. Uses FixedMultiply() rather than FixMul() for the same
+   reason IterateEscapeTimeFixed() does - this runs only once per
+   pixel rather than up to maxIterations times, so the win here is far
+   smaller, but free to take once a correct general replacement exists
+   anyway. */
 Boolean IsInMainCardioidOrBulb(double cRe, double cIm) {
 	double q = (cRe - 0.25) * (cRe - 0.25) + cIm * cIm;
 	
@@ -235,15 +654,15 @@ Boolean IsInMainCardioidOrBulb(double cRe, double cIm) {
 
 Boolean IsInMainCardioidOrBulbFixed(Fixed cRe, Fixed cIm) {
 	Fixed cReMinusQuarter = cRe - kFixedQuarter;
-	Fixed cImSquared      = FixMul(cIm, cIm);
-	Fixed q               = FixMul(cReMinusQuarter, cReMinusQuarter) + cImSquared;
+	Fixed cImSquared      = FixedMultiply(cIm, cIm);
+	Fixed q               = FixedMultiply(cReMinusQuarter, cReMinusQuarter) + cImSquared;
 	
-	if (FixMul(q, q + cReMinusQuarter) <= FixMul(kFixedQuarter, cImSquared))
+	if (FixedMultiply(q, q + cReMinusQuarter) <= FixedMultiply(kFixedQuarter, cImSquared))
 		return true;
 	
 	{
 		Fixed cRePlusOne = cRe + ((Fixed) 1 << 16);
-		if (FixMul(cRePlusOne, cRePlusOne) + cImSquared <= kFixedSixteenth)
+		if (FixedMultiply(cRePlusOne, cRePlusOne) + cImSquared <= kFixedSixteenth)
 			return true;
 	}
 	
@@ -307,7 +726,8 @@ void MapPixelToPlaneFixed(const FractalMappingFixed *mapping, short x, short y, 
    every call) and maxIterations (always one of a handful of values
    across this whole project, recomputing the *same* result every
    call). log() is transcendental; on an FPU-less Mac it runs through
-   SANE's software float library, meaningfully slower than +/-/*//
+   SANE's software float library, meaningfully slower than ordinary
+   add, subtract, multiply, or divide
    - and unlike the escape-time shortcuts above, every single sample
    needs a shade level regardless of what's being viewed. Precomputing
    log(i+1) for every i any caller could plausibly ask for turns both

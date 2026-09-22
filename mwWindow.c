@@ -10,6 +10,9 @@
 #include <QDOffscreen.h>
 #include "mwWindow.h"
 #include "mwFractalMath.h"	/* iteration, interior/shading maths - see that file */
+#include "mwLyapunovMath.h"	/* IterateLyapunovExponent() - see SampleLyapunov() */
+#include "mwNewtonMath.h"	/* IterateNewton()/NewtonRootIndex() - see SampleNewton() */
+#include "mwParameterDialog.h"	/* ShowParameterDialog()/ParameterField - see ConfigureMultibrot() */
 #ifndef _Quickdraw_
 #include <Quickdraw.h>
 #endif
@@ -127,6 +130,85 @@ static short windowHeight = 300;
 #define kJuliaDefaultCentreIm			0.0
 #define kJuliaDefaultHalfWidthRe		1.5
 
+/* Burning Ship's own default view - real -2.5..1.5, imaginary -1..2,
+   matching the full-fractal framing widely cited for it (e.g.
+   Wikimedia Commons' own "Burning Ship Fractal.png", lower-left
+   (-2.5,-1), upper-right (1.5,2)) rather than reusing Mandelbrot's
+   own (very different-shaped) default above. centreIm is positive
+   because this project's own pixel-to-plane mapping already has Im
+   increasing downward as pixel y increases (MapPixelToPlaneDouble()/
+   Fixed(), mwFractalMath.c) - the same convention several of the
+   sources above describe as giving the ship its traditional upright
+   orientation. Worth checking against the actual rendered image
+   regardless - if it comes out upside down, negating this value is
+   the entire fix. */
+#define kBurningShipDefaultCentreRe		-0.5
+#define kBurningShipDefaultCentreIm		0.5
+#define kBurningShipDefaultHalfWidthRe	2.0
+
+/* Tricorn's own default view - the same box widely cited for both it
+   and plain Mandelbrot's classic (not this project's own tuned)
+   framing: real -2.5..1, imaginary -1..1 (e.g. HandWiki's Tricorn and
+   Burning Ship articles both use this exact box in their reference
+   pseudocode). Not reusing kMandelbrotDefaultCentreRe/Im/HalfWidthRe
+   above - those were tuned for the plain Mandelbrot shape specifically,
+   not verified to frame Tricorn's own, differently-proportioned
+   three-cusped shape well. */
+#define kTricornDefaultCentreRe			-0.75
+#define kTricornDefaultCentreIm		0.0
+#define kTricornDefaultHalfWidthRe		1.75
+
+/* Multibrot's own default view - a generic, conservative Mandelbrot-
+   like framing rather than this project's own tuned one, since it
+   hasn't been verified (unlike Burning Ship/Tricorn above, sourced
+   from cited reference images) to frame every power 3-5 well; picked
+   to be safely unlikely to show an empty view for any of them, not
+   tuned for any one. */
+#define kMultibrotDefaultCentreRe		-0.5
+#define kMultibrotDefaultCentreIm		0.0
+#define kMultibrotDefaultHalfWidthRe	1.5
+
+/* Phoenix's own default view - a generic, safe Mandelbrot-scale
+   framing, the same reasoning as Multibrot's own above: not sourced
+   from any specific cited rendering of this fractal (unlike Burning
+   Ship/Tricorn), just picked to be unlikely to show an empty view. Its
+   iteration keeps the same real-axis mirror symmetry plain Mandelbrot
+   has (p is real), so centreIm=0 is still the sensible choice here. */
+#define kPhoenixDefaultCentreRe			-0.5
+#define kPhoenixDefaultCentreIm		0.0
+#define kPhoenixDefaultHalfWidthRe		1.5
+
+/* Lyapunov's own default view - not a complex plane at all (see
+   mwLyapunovMath.h's own comment), but the same gView/pixel-mapping
+   machinery reused for its a-b parameter plane instead: centreRe/Im
+   here are a and b's own centres, halfWidthRe their own half-range.
+   [2.5, 4.0] on both axes is the standard "interesting" region for the
+   driven logistic map - below about 2.5 either parameter just
+   converges to a stable fixed point with nothing structurally
+   interesting to see, and 4.0 is the map's own upper bound (x leaves
+   [0,1] above it). This is a real, well-established range for this
+   fractal specifically, not a generic placeholder the way Multibrot's/
+   Phoenix's own defaults above are. */
+#define kLyapunovDefaultCentreRe		3.25
+#define kLyapunovDefaultCentreIm		3.25
+#define kLyapunovDefaultHalfWidthRe		0.75
+
+/* Newton's own default view - the polynomial's own roots (the power-th
+   roots of unity) all sit exactly on the unit circle regardless of
+   power, so a view comfortably larger than that circle (real -2..2,
+   scaled to the window's own aspect for the imaginary axis) shows every
+   basin's own structure for any power this fractal offers - a real,
+   geometry-derived choice, not a generic placeholder the way
+   Multibrot's/Phoenix's own defaults are. kNewtonMaxIterations: Newton's
+   method converges quadratically, so most points settle in well under
+   10 iterations - 32 gives real headroom without the coarse-pass
+   iteration-ceiling reduction (UpdateIterationCeilingForBlockSize())
+   needing to matter much either way for this fractal. */
+#define kNewtonDefaultCentreRe			0.0
+#define kNewtonDefaultCentreIm			0.0
+#define kNewtonDefaultHalfWidthRe		2.0
+#define kNewtonMaxIterations			32
+
 #define kMandelbrotMaxIterations	64
 
 #define kJuliaConstantRe		-0.7
@@ -170,15 +252,20 @@ Rect		dragRect;
 Rect		windowBounds = { windowY, windowX, windowY+300, windowX+512 };
 Rect		imageStart = {0, 0, 300, 512};
 
-/* width doubles as the fractal-type selector (1=Tree, 2=Mandelbrot,
-   3=Julia - see HandleMenu()'s fractalID case in mwMenus.c) and,
-   before the person has ever picked one, a sentinel meaning "nothing
-   selected yet" - deliberately a value none of the real fractal types
-   use, so RenderFractalOffscreen()'s width==1/2/3 checks all
-   correctly fall through to doing nothing, leaving the window blank
-   exactly as it is on a fresh launch. StartNewFractal() (mwMenus.c's
-   "New Fractal") resets back to this same value. */
-#define kNoFractalSelectedWidth	5
+/* width doubles as the fractal-type selector - see kFractalTypes[]
+   below for which ID is which - and, before the person has ever
+   picked one, kNoFractalSelectedWidth (mwWindow.h), a sentinel meaning
+   "nothing selected yet". 0 rather than one past the last real type
+   (which is what this used to be, back when there were only ever
+   three types to be "one past"): a fixed offset like that collides
+   the moment a type gets added at that same ID, which is exactly what
+   very nearly happened when Burning Ship arrived - 0 is guaranteed
+   distinct from every real type's ID regardless of how many exist,
+   since real IDs start at 1 and DescriptorForWidth() has nothing to
+   look up for it, so RenderFractalOffscreen() and friends all
+   correctly do nothing, leaving the window blank exactly as it is on
+   a fresh launch. StartNewFractal() (mwMenus.c's "New Fractal") resets
+   back to this same value. */
 int			width = kNoFractalSelectedWidth;
 
 /* The current Mandelbrot/Julia view - see FractalView in mwWindow.h.
@@ -188,19 +275,28 @@ int			width = kNoFractalSelectedWidth;
    mwMenus.c - but this costs nothing to have anyway). */
 FractalView	gView = { kMandelbrotDefaultCentreRe, kMandelbrotDefaultCentreIm, kMandelbrotDefaultHalfWidthRe };
 
-/* ResetViewForCurrentFractal()
-   See mwWindow.h. */
-void ResetViewForCurrentFractal(void) {
-	if (width == 2) {
-		gView.centreRe    = kMandelbrotDefaultCentreRe;
-		gView.centreIm    = kMandelbrotDefaultCentreIm;
-		gView.halfWidthRe = kMandelbrotDefaultHalfWidthRe;
-	} else if (width == 3) {
-		gView.centreRe    = kJuliaDefaultCentreRe;
-		gView.centreIm    = kJuliaDefaultCentreIm;
-		gView.halfWidthRe = kJuliaDefaultHalfWidthRe;
-	}
-}
+/* Forward declaration only - see the full definition and kFractalTypes[]
+   itself further down this file (after the sample functions each row's
+   sampleProc field points to are forward-declared). A typedef to an
+   incomplete struct is fine to use as an opaque pointer, which is all
+   every caller before that point needs - but NOT to dereference a
+   member through, which needs the full definition visible at the
+   point of the dereference, not just at the point of the call. That
+   distinction is exactly what caught ResetViewForCurrentFractal()/
+   MaximumHalfWidthReForCurrentFractal()/
+   IsCurrentViewTheDefaultForCurrentFractal() out - all three actually
+   read a descriptor's own fields, not just pass the pointer around, so
+   all three had to move below the real struct definition instead of
+   living up here where it would have been more natural to group them
+   with ResetViewForCurrentFractal()'s own public declaration. Real
+   testing (an actual compile) is what caught this - none of the checks
+   this project could run without a working toolchain (brace/paren
+   balance, comment pairing) can catch a type-completeness error, since
+   it's a property of the language's own rules, not the text's shape. */
+typedef struct FractalTypeDescriptor FractalTypeDescriptor;
+static const FractalTypeDescriptor *DescriptorForWidth(short widthValue);
+static double  MaximumHalfWidthReForCurrentFractal(void);
+static Boolean IsCurrentViewTheDefaultForCurrentFractal(void);
 
 /* MapPixelToComplexPlane()
    See mwWindow.h. A convenience wrapper for mwFractalMath.h's own
@@ -219,28 +315,15 @@ void MapPixelToComplexPlane(short x, short y, double *outRe, double *outIm) {
 	MapPixelToPlaneDouble(&mapping, x, y, outRe, outIm);
 }
 
-/* MaximumHalfWidthReForCurrentFractal()
-   The current fractal's own default halfWidthRe - the ceiling
-   ClampHalfWidthRe() enforces, so zooming out repeatedly can't show an
-   ever-larger, eventually meaningless region beyond what the fractal
-   was ever meant to be viewed at. Falls back to Mandelbrot's own
-   default for any other width - shouldn't be reached in practice,
-   since callers check IsZoomAvailable() first, but returning a
-   sensible, real value here instead of leaving this undefined for a
-   caller that doesn't check first, does no harm. */
-static double MaximumHalfWidthReForCurrentFractal(void) {
-	if (width == 3)
-		return kJuliaDefaultHalfWidthRe;
-	
-	return kMandelbrotDefaultHalfWidthRe;
-}
-
 /* ClampHalfWidthRe()
    See mwWindow.h. Picks between mwFractalMath.h's two precision
    floors by gHasFPU - see their own comment there for why they
    differ. This is the only place that distinction needs to be made:
    every other caller (zoom in/out, marquee, FRCT load) reaches its
-   own halfWidthRe only through this function. */
+   own halfWidthRe only through this function. MaximumHalfWidthReForCurrentFractal()
+   itself is defined later in this file (after kFractalTypes[]'s own
+   full definition, which it needs to dereference) - its forward
+   declaration above is enough for this call. */
 double ClampHalfWidthRe(double proposedHalfWidthRe) {
 	double maximum = MaximumHalfWidthReForCurrentFractal();
 	double minimum = gHasFPU ? kFractalMinHalfWidthReDouble : kFractalMinHalfWidthReFixed;
@@ -320,28 +403,6 @@ static long				gDefaultViewCachePixelsSize = 0;
 static unsigned char	*gDefaultViewCacheShadeLevels = NULL;
 static short			gDefaultViewCacheWidth = 0;
 
-/* IsCurrentViewTheDefaultForCurrentFractal()
-   True if gView currently holds exactly the current fractal's own
-   default view - an exact floating-point comparison against the same
-   literal constants ResetViewForCurrentFractal() assigns, which is
-   safe here for the same reason SampleMandelbrot()'s centreIm==0.0
-   check is: gView only ever holds one of these exact literals, or a
-   value computed by the marquee zoom feature's interpolation
-   (mwZoom.c), which would only match by the most remote coincidence. */
-static Boolean IsCurrentViewTheDefaultForCurrentFractal(void) {
-	if (width == 2)
-		return gView.centreRe    == kMandelbrotDefaultCentreRe
-				&& gView.centreIm    == kMandelbrotDefaultCentreIm
-				&& gView.halfWidthRe == kMandelbrotDefaultHalfWidthRe;
-	
-	if (width == 3)
-		return gView.centreRe    == kJuliaDefaultCentreRe
-				&& gView.centreIm    == kJuliaDefaultCentreIm
-				&& gView.halfWidthRe == kJuliaDefaultHalfWidthRe;
-	
-	return false;
-}
-
 /* CacheOffscreenAsDefaultViewIfApplicable()
    Snapshots the offscreen image (and, for mono, gMonoShadeLevels) into
    the default-view cache, if the render that just finished was for
@@ -395,8 +456,227 @@ static void CacheOffscreenAsDefaultViewIfApplicable(void) {
 
 /* A fractal sample function reports how "escaped" the point at (x,y)
    is, on the shared kShadingScale range - see SampleMandelbrot() and
-   SampleJulia(). */
+   SampleJulia(). A fractal configure proc shows whatever
+   ShowParameterDialog() (mwParameterDialog.h) call a type needs before
+   it can render at all, returning false if the person cancelled -
+   NULL for every type that doesn't need one. A fractal direct-draw
+   proc draws a type that doesn't sample at all (the Tree; eventually
+   Fern/Sierpinski) - zero arguments deliberately, so this table can
+   dispatch through one function pointer type regardless of what
+   parameters any one type's own drawing function actually needs
+   internally (DrawBranch()'s x/y/angle/depth aren't meaningful for an
+   IFS fractal at all) - see DrawTreeOffscreen()/DrawTreeDirectly(). */
 typedef short (*FractalSampleProc)(short x, short y);
+typedef Boolean (*FractalConfigureProc)(void);
+typedef void (*FractalDirectDrawProc)(void);
+
+/* Forward declarations for kFractalTypes[] below, which references
+   these by name for its sampleProc/configureProc columns before any
+   of them are actually defined further down this file - a plain
+   identifier used this way (not as a call) needs a prior declaration
+   to be valid C at all, not just a style preference the way forward-
+   declaring an ordinary called function often is. */
+static short		SampleMandelbrot(short x, short y);
+static short		SampleJulia(short x, short y);
+static short		SampleBurningShip(short x, short y);
+static short		SampleTricorn(short x, short y);
+static short		SampleMultibrotConfigurable(short x, short y);
+static short		SamplePhoenix(short x, short y);
+static short		SampleLyapunov(short x, short y);
+static Boolean		ConfigureLyapunov(void);
+static short		SampleNewton(short x, short y);
+static Boolean		ConfigureNewton(void);
+static Boolean		ConfigureMultibrot(void);
+static void			DrawTreeOffscreen(void);
+static void			DrawTreeDirectly(void);
+static void			DrawFernOffscreen(void);
+static void			DrawFernDirectly(void);
+static void			DrawSierpinskiOffscreen(void);
+static void			DrawSierpinskiDirectly(void);
+
+/* One row per fractal type - name, family (menu grouping - see
+   mwMenus.c's SetUpMenus() - and FractalFamilyForWidth()), which
+   function actually samples it (NULL for a direct-draw type - the
+   Tree, and eventually Fern/Sierpinski - which uses directDrawProc/
+   directDrawDirectProc instead, see RenderFractalOffscreen()/
+   DrawFractalDirectly()), its own iteration ceiling, its own default
+   view, its fixed constant if it has one (Julia only, so far - see
+   FractalTypeHasFixedConstant()), its own configuration step if it
+   needs one (Multibrot's power, via ConfigureMultibrot() - see
+   FractalTypeNeedsConfigurationAtIndex()/ConfigureFractalTypeIfNeeded()),
+   and its own pair of direct-draw functions if it doesn't sample at
+   all (the Tree's DrawTreeOffscreen()/DrawTreeDirectly(), thin
+   wrappers around DrawBranch()/DrawBranchDirectly() so this table can
+   dispatch through a plain zero-argument function pointer regardless
+   of what parameters any one type's own drawing function actually
+   needs internally). This replaces what used to be five separate
+   width==1/2/3 chains (FractalTypeNameForWidth(), FindFractalTypeByName(),
+   ResetViewForCurrentFractal(), MaximumHalfWidthReForCurrentFractal(),
+   RenderFractalOffscreen()/DrawFractalDirectly()'s own dispatch, and
+   GetFractalParameters()) - each one a place a new fractal type could
+   be added to some but not all of, silently. One table now, read by
+   DescriptorForWidth() below; adding a type is one new row.
+
+   typeID values are stable identifiers, not menu positions - nothing
+   here assumes typeID N sits at Fractal-menu item N (see
+   mwMenus.c's own comment on why that assumption broke). The values
+   themselves don't need to mean anything beyond "distinct" - existing
+   saved .frct files already carry the type by name (see
+   FindFractalTypeByName()), not by this number, so renumbering later
+   costs nothing. */
+struct FractalTypeDescriptor {
+	short					typeID;
+	const char				*name;
+	FractalFamily			family;
+	FractalSampleProc		sampleProc;
+	short					maxIterations;
+	double					defaultCentreRe;
+	double					defaultCentreIm;
+	double					defaultHalfWidthRe;
+	Boolean					hasFixedConstant;
+	double					constantRe;
+	double					constantIm;
+	FractalConfigureProc	configureProc;
+	FractalDirectDrawProc	directDrawProc;
+	FractalDirectDrawProc	directDrawDirectProc;
+};
+
+static const FractalTypeDescriptor kFractalTypes[] = {
+	{ 1, "Tree",         kFractalFamilyRecursive,  NULL,                       0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawTreeOffscreen, DrawTreeDirectly },
+	{ 10, "Barnsley Fern", kFractalFamilyRecursive, NULL,                      0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawFernOffscreen, DrawFernDirectly },
+	{ 11, "Sierpinski",  kFractalFamilyRecursive,  NULL,                       0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawSierpinskiOffscreen, DrawSierpinskiDirectly },
+	{ 2, "Mandelbrot",   kFractalFamilyEscapeTime, SampleMandelbrot,           kMandelbrotMaxIterations, kMandelbrotDefaultCentreRe, kMandelbrotDefaultCentreIm, kMandelbrotDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
+	{ 3, "Julia",        kFractalFamilyEscapeTime, SampleJulia,                kJuliaMaxIterations,      kJuliaDefaultCentreRe, kJuliaDefaultCentreIm, kJuliaDefaultHalfWidthRe, true, kJuliaConstantRe, kJuliaConstantIm, NULL,               NULL, NULL },
+	{ 4, "Burning Ship", kFractalFamilyEscapeTime, SampleBurningShip,          kMandelbrotMaxIterations, kBurningShipDefaultCentreRe, kBurningShipDefaultCentreIm, kBurningShipDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
+	{ 5, "Tricorn",      kFractalFamilyEscapeTime, SampleTricorn,              kMandelbrotMaxIterations, kTricornDefaultCentreRe, kTricornDefaultCentreIm, kTricornDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
+	{ 6, "Multibrot",    kFractalFamilyEscapeTime, SampleMultibrotConfigurable, kMandelbrotMaxIterations, kMultibrotDefaultCentreRe, kMultibrotDefaultCentreIm, kMultibrotDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureMultibrot, NULL, NULL },
+	{ 7, "Phoenix",      kFractalFamilyEscapeTime, SamplePhoenix,               kMandelbrotMaxIterations, kPhoenixDefaultCentreRe, kPhoenixDefaultCentreIm, kPhoenixDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
+	{ 8, "Lyapunov",     kFractalFamilyStatistical, SampleLyapunov,             0,                        kLyapunovDefaultCentreRe, kLyapunovDefaultCentreIm, kLyapunovDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureLyapunov,  NULL, NULL },
+	{ 9, "Newton",       kFractalFamilyConvergence, SampleNewton,               kNewtonMaxIterations,     kNewtonDefaultCentreRe, kNewtonDefaultCentreIm, kNewtonDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureNewton,    NULL, NULL }
+};
+#define kFractalTypeCount	(sizeof(kFractalTypes) / sizeof(kFractalTypes[0]))
+
+/* DescriptorForWidth()
+   The one row matching widthValue, or NULL for kNoFractalSelectedWidth
+   or anything else this build doesn't have - every caller below
+   already checks for NULL rather than assuming a match, the same
+   caution FractalTypeNameForWidth()'s own comment already called for
+   before this table existed. */
+static const FractalTypeDescriptor *DescriptorForWidth(short widthValue) {
+	short i;
+	
+	for (i = 0; i < (short) kFractalTypeCount; i++) {
+		if (kFractalTypes[i].typeID == widthValue)
+			return &kFractalTypes[i];
+	}
+	
+	return NULL;
+}
+
+/* ResetViewForCurrentFractal()
+   See mwWindow.h. Does nothing for the Tree (no descriptor row - it
+   has no view at all) or an unrecognised width, exactly as the old
+   width==2/3 chain this replaced did for anything other than
+   Mandelbrot or Julia. Defined here, after kFractalTypes[]'s own full
+   definition above, rather than up near gView where it would read
+   more naturally next to its own declaration in mwWindow.h - it
+   dereferences a descriptor's own fields, which needs the complete
+   struct visible at the point of the dereference itself, not just a
+   forward-declared pointer to it (real testing - an actual compile -
+   caught this out; see the forward-declaration comment further up
+   this file for the full story). */
+void ResetViewForCurrentFractal(void) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
+	
+	if (descriptor == NULL || !FractalTypeHasView(width))
+		return;
+	
+	gView.centreRe    = descriptor->defaultCentreRe;
+	gView.centreIm    = descriptor->defaultCentreIm;
+	gView.halfWidthRe = descriptor->defaultHalfWidthRe;
+}
+
+/* MaximumHalfWidthReForCurrentFractal()
+   The current fractal's own default halfWidthRe - the ceiling
+   ClampHalfWidthRe() enforces, so zooming out repeatedly can't show an
+   ever-larger, eventually meaningless region beyond what the fractal
+   was ever meant to be viewed at. Falls back to Mandelbrot's own
+   default for the Tree or an unrecognised width - shouldn't be
+   reached in practice, since callers check IsZoomAvailable() first,
+   but returning a sensible, real value here instead of leaving this
+   undefined for a caller that doesn't check first, does no harm.
+   Defined here rather than next to ClampHalfWidthRe() itself, for the
+   same struct-completeness reason as ResetViewForCurrentFractal()
+   above. */
+static double MaximumHalfWidthReForCurrentFractal(void) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
+	
+	if (descriptor != NULL && FractalTypeHasView(width))
+		return descriptor->defaultHalfWidthRe;
+	
+	return kMandelbrotDefaultHalfWidthRe;
+}
+
+/* IsCurrentViewTheDefaultForCurrentFractal()
+   True if gView currently holds exactly the current fractal's own
+   default view - an exact floating-point comparison against the same
+   literal constants ResetViewForCurrentFractal() assigns from this
+   same table, which is safe here because gView only ever holds one of
+   these exact literals, or a value computed by the marquee zoom
+   feature's interpolation (mwZoom.c), which would only match by the
+   most remote coincidence. False for the Tree (no descriptor row) or
+   an unrecognised width, same as ResetViewForCurrentFractal(). Defined
+   here rather than next to CacheOffscreenAsDefaultViewIfApplicable()
+   itself, for the same struct-completeness reason as
+   ResetViewForCurrentFractal() above. */
+static Boolean IsCurrentViewTheDefaultForCurrentFractal(void) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
+	
+	if (descriptor == NULL || !FractalTypeHasView(width))
+		return false;
+	
+	return gView.centreRe    == descriptor->defaultCentreRe
+			&& gView.centreIm    == descriptor->defaultCentreIm
+			&& gView.halfWidthRe == descriptor->defaultHalfWidthRe;
+}
+
+/* FractalTypeCount()/FractalTypeIDAtIndex()/FractalTypeNameAtIndex()/
+   FractalTypeFamilyAtIndex()
+   See mwWindow.h. Index isn't bounds-checked - every caller is
+   mwMenus.c's SetUpMenus(), looping 0..FractalTypeCount()-1 itself. */
+short FractalTypeCount(void) {
+	return (short) kFractalTypeCount;
+}
+
+short FractalTypeIDAtIndex(short index) {
+	return kFractalTypes[index].typeID;
+}
+
+const char *FractalTypeNameAtIndex(short index) {
+	return kFractalTypes[index].name;
+}
+
+FractalFamily FractalTypeFamilyAtIndex(short index) {
+	return kFractalTypes[index].family;
+}
+
+Boolean FractalTypeNeedsConfigurationAtIndex(short index) {
+	return kFractalTypes[index].configureProc != NULL;
+}
+
+/* ConfigureFractalTypeIfNeeded()
+   See mwWindow.h. Looks widthValue up itself (rather than taking a
+   descriptor pointer) since HandleMenu() (mwMenus.c) - the only
+   caller - only ever has a type ID at this point, not a pointer into
+   a table it doesn't have access to. */
+Boolean ConfigureFractalTypeIfNeeded(short widthValue) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(widthValue);
+	
+	if (descriptor == NULL || descriptor->configureProc == NULL)
+		return true;
+	
+	return descriptor->configureProc();
+}
 
 /* The iteration ceiling SampleMandelbrot()/SampleJulia() actually use
    for whatever block is currently being sampled - see
@@ -413,21 +693,24 @@ static short currentIterationCeiling;
    render (PrepareRenderMapping(), called from both
    StartProgressiveRender() and DrawFractalDirectly()) rather than
    re-derived per pixel - see mwFractalMath.h's own comment on why
-   this matters. Only the one gHasFPU-selected struct is ever
-   meaningful in a given render; SampleMandelbrot()/SampleJulia()
-   read whichever one applies, exactly as they already dispatch on
-   gHasFPU for everything else. Distinct from MapPixelToComplexPlane()'s
-   own, freshly-Prepared-per-call mapping (mwZoom.c/mwSaveAs.c's
-   occasional use) - these two never need to agree on freshness
-   since each caller Prepares its own. */
+   this matters. Both are always prepared, not just whichever gHasFPU
+   would select: most sample functions only ever read the one that
+   matches gHasFPU, exactly as they dispatch on it for everything
+   else, but Lyapunov and Newton are always-double regardless of
+   gHasFPU (see IterateLyapunovExponent()'s own comment on why) and
+   need gRenderMappingDouble to be valid even on non-FPU hardware.
+   Preparing the one a given render won't actually use costs a few
+   divisions, once per render, not per pixel - negligible next to
+   anything else here. Distinct from MapPixelToComplexPlane()'s own,
+   freshly-Prepared-per-call mapping (mwZoom.c/mwSaveAs.c's occasional
+   use) - these two never need to agree on freshness since each caller
+   Prepares its own. */
 static FractalMappingDouble	gRenderMappingDouble;
 static FractalMappingFixed		gRenderMappingFixed;
 
 static void PrepareRenderMapping(void) {
-	if (gHasFPU)
-		PrepareFractalMappingDouble(&gRenderMappingDouble, &gView, windowWidth, windowHeight);
-	else
-		PrepareFractalMappingFixed(&gRenderMappingFixed, &gView, windowWidth, windowHeight);
+	PrepareFractalMappingDouble(&gRenderMappingDouble, &gView, windowWidth, windowHeight);
+	PrepareFractalMappingFixed(&gRenderMappingFixed, &gView, windowWidth, windowHeight);
 }
 
 /* Progressive render job -------------------------------------------
@@ -479,8 +762,6 @@ static unsigned long lastBlitTick = 0;
 
 static void			BeginRendering(void);
 static void			EndRendering(void);
-static short		SampleMandelbrot(short x, short y);
-static short		SampleJulia(short x, short y);
 static RGBColor		ColourForShadeLevel(short shadeLevel);
 static unsigned short	InterpolateComponent(unsigned short from, unsigned short to, double fraction);
 static CTabHandle	BuildFractalColourTable(void);
@@ -597,6 +878,221 @@ static void DrawBranchDirectly(float x1, float y1, float angle, float depth) {
 	}
 }
 
+/* DrawTreeOffscreen()/DrawTreeDirectly()
+   Zero-argument wrappers around DrawBranch()/DrawBranchDirectly() - see
+   FractalDirectDrawProc's own comment on why kFractalTypes[] (this
+   file) needs this shape rather than calling either directly. */
+static void DrawTreeOffscreen(void) {
+	DrawBranch(windowWidth/2, 0, 90, kTreeInitialDepth);
+}
+
+static void DrawTreeDirectly(void) {
+	DrawBranchDirectly(windowWidth/2, 0, 90, kTreeInitialDepth);
+}
+
+/* RandomUnitInterval()
+   A pseudo-random double in [0,1), from the Toolbox's own Random() - a
+   signed 16-bit value, widened to unsigned first so the full 16-bit
+   range maps onto [0,1) rather than folding the negative half back
+   over the positive one. Used by the IFS/chaos-game fractals below
+   (Fern, Sierpinski) to pick which transformation applies at each
+   step - the only place in this project that needs a general-purpose
+   random number at all, so there's no existing convention here to
+   match beyond the Toolbox's own standard call. */
+static double RandomUnitInterval(void) {
+	return ((double) ((unsigned short) Random())) / 65536.0;
+}
+
+/* Barnsley's fern - four affine transformations applied with fixed
+   probabilities (Barnsley, "Fractals Everywhere"; coefficients and
+   probabilities as widely published and cross-checked against several
+   independent sources before use here): f1 (p=0.01, the stem), f2
+   (p=0.85, successively smaller leaflets - by far the most common,
+   which is what actually builds up the frond's overall shape), f3/f4
+   (p=0.07 each, the largest left/right leaflets). The fern's own
+   natural coordinate range is x in [-2.5,2.5], y in [0,10] (stem at
+   y=0, frond tip near y=10) - kFernPointCount points are plotted after
+   discarding a short settling-in period so the arbitrary (0,0)
+   starting point doesn't leave a stray mark outside the actual
+   attractor.
+
+   kFernPointCount is a deliberate compromise: enough points for a
+   recognisable, reasonably detailed frond (many published renderings
+   use 50,000-100,000+), but not so many that plotting them one at a
+   time - the only way to draw an IFS fractal, unlike the escape-time
+   family's block-filling - takes an excessive amount of time on this
+   project's own slowest real target (the Mac 512KE); each point costs
+   only a handful of multiplies and a single-pixel draw, considerably
+   cheaper per-point than any escape-time or convergence fractal's own
+   per-pixel cost, but there is still no way to draw fewer than
+   kFernPointCount actual points and have all of them show up. Worth
+   revisiting with real timing once this can actually be tested on
+   that hardware.
+
+   Colour follows the same "distance from the base" idea
+   BranchColourIndexForDepth() already uses for the Tree - here, a
+   point's own fern-space y (height above the stem) mapped directly
+   onto the shared 0..kShadingScale range, rather than recursion depth,
+   since an IFS fractal built by the chaos-game method has no
+   recursion depth to speak of. */
+#define kFernPointCount				20000
+#define kFernSettlingIterations		20
+#define kFernMinX					(-2.5)
+#define kFernMaxX					2.5
+#define kFernMinY					0.0
+#define kFernMaxY					10.0
+#define kFernBottomMarginPx			10
+
+static void FernToScreen(double fernX, double fernY, short *outX, short *outY) {
+	double widthScale  = windowWidth  / (kFernMaxX - kFernMinX);
+	double heightScale = windowHeight / (kFernMaxY - kFernMinY);
+	double scale        = 0.9 * ((widthScale < heightScale) ? widthScale : heightScale);
+	
+	*outX = (short) (windowWidth / 2 + fernX * scale);
+	*outY = (short) (windowHeight - kFernBottomMarginPx - fernY * scale);
+}
+
+static short FernShadeLevel(double fernY) {
+	double normalised = (fernY - kFernMinY) / (kFernMaxY - kFernMinY);
+	
+	if (normalised < 0.0)
+		normalised = 0.0;
+	else if (normalised > 1.0)
+		normalised = 1.0;
+	
+	return (short) (normalised * kShadingScale);
+}
+
+static void DrawFernPoints(Boolean intoOffscreen) {
+	double	x = 0.0, y = 0.0;
+	long	i;
+	
+	for (i = 0; i < kFernSettlingIterations + kFernPointCount; i++) {
+		double	roll = RandomUnitInterval();
+		double	newX, newY;
+		
+		if (roll < 0.01) {
+			newX = 0.0;
+			newY = 0.16 * y;
+		} else if (roll < 0.86) {
+			newX = 0.85 * x + 0.04 * y;
+			newY = -0.04 * x + 0.85 * y + 1.6;
+		} else if (roll < 0.93) {
+			newX = 0.20 * x - 0.26 * y;
+			newY = 0.23 * x + 0.22 * y + 1.6;
+		} else {
+			newX = -0.15 * x + 0.28 * y;
+			newY = 0.26 * x + 0.24 * y + 0.44;
+		}
+		
+		x = newX;
+		y = newY;
+		
+		if (i >= kFernSettlingIterations) {
+			short screenX, screenY;
+			
+			FernToScreen(x, y, &screenX, &screenY);
+			
+			if (intoOffscreen && gHasColourQD) {
+				DrawIndexedLine(screenX, screenY, screenX, screenY, FernShadeLevel(y));
+			} else {
+				MoveTo(screenX, screenY);
+				Line(0, 0);
+			}
+		}
+	}
+}
+
+static void DrawFernOffscreen(void) {
+	DrawFernPoints(true);
+}
+
+static void DrawFernDirectly(void) {
+	DrawFernPoints(false);
+}
+
+/* Sierpinski's triangle, via the chaos game (not recursive subdivision):
+   start at one vertex of a fixed triangle, repeatedly move halfway
+   toward a randomly-chosen vertex (any of the three, equal
+   probability), plotting the new point each time - the standard,
+   widely-documented construction. Vertices are placed directly in
+   screen space (scaled to the current window, with a fixed margin),
+   not through a separate coordinate system and mapping function the
+   way the Fern's own biologically-calibrated coefficients need -
+   Sierpinski's triangle has no inherent "natural" bounding box the
+   way the Fern does, so there's nothing a separate space would add
+   here.
+
+   Colour: a genuine chaos-game run has no recursion depth the way
+   Tree's own recursive drawing does, but choosing the SAME vertex
+   several times in a row is the chaos-game's own analogue of it - a
+   point that does is moving deep into that one vertex's smallest
+   self-similar sub-triangle, exactly what recursing toward a corner
+   would do directly. gSierpinskiRunLength (local to DrawSierpinskiPoints(),
+   not persisted between calls) counts consecutive same-vertex picks,
+   capped at kSierpinskiMaxRunLength for shading purposes - long runs
+   are real but increasingly rare (probability (1/3)^n), so capping
+   avoids most of the shading range going unused waiting for runs that
+   essentially never happen at this point count. */
+#define kSierpinskiPointCount			20000
+#define kSierpinskiSettlingIterations	20
+#define kSierpinskiMarginPx				20
+#define kSierpinskiMaxRunLength			8
+
+static void DrawSierpinskiPoints(Boolean intoOffscreen) {
+	double	vertexX[3], vertexY[3];
+	double	x, y;
+	short	lastVertex = -1;
+	short	runLength = 0;
+	long	i;
+	
+	vertexX[0] = windowWidth / 2.0;				vertexY[0] = kSierpinskiMarginPx;
+	vertexX[1] = kSierpinskiMarginPx;				vertexY[1] = windowHeight - kSierpinskiMarginPx;
+	vertexX[2] = windowWidth - kSierpinskiMarginPx;	vertexY[2] = windowHeight - kSierpinskiMarginPx;
+	
+	x = vertexX[0];
+	y = vertexY[0];
+	
+	for (i = 0; i < kSierpinskiSettlingIterations + kSierpinskiPointCount; i++) {
+		short chosen = (short) (RandomUnitInterval() * 3.0);
+		
+		if (chosen > 2)
+			chosen = 2;		/* guards the extremely rare RandomUnitInterval()==1.0 edge, which would otherwise index one past vertexX/Y */
+		
+		if (chosen == lastVertex) {
+			if (runLength < kSierpinskiMaxRunLength)
+				runLength++;
+		} else {
+			runLength = 1;
+		}
+		lastVertex = chosen;
+		
+		x = (x + vertexX[chosen]) / 2.0;
+		y = (y + vertexY[chosen]) / 2.0;
+		
+		if (i >= kSierpinskiSettlingIterations) {
+			short screenX = (short) x;
+			short screenY = (short) y;
+			
+			if (intoOffscreen && gHasColourQD) {
+				short shadeLevel = (short) (((double) runLength / (double) kSierpinskiMaxRunLength) * kShadingScale);
+				DrawIndexedLine(screenX, screenY, screenX, screenY, shadeLevel);
+			} else {
+				MoveTo(screenX, screenY);
+				Line(0, 0);
+			}
+		}
+	}
+}
+
+static void DrawSierpinskiOffscreen(void) {
+	DrawSierpinskiPoints(true);
+}
+
+static void DrawSierpinskiDirectly(void) {
+	DrawSierpinskiPoints(false);
+}
+
 /* SampleMandelbrot()/SampleJulia()
    Map (x,y) through gRenderMappingDouble/Fixed (see PrepareRenderMapping()),
    dispatching on gHasFPU exactly as the maths itself does - the
@@ -656,6 +1152,355 @@ static short SampleJulia(short x, short y) {
 	}
 	
 	return ShadeLevelForIterationCount(iterationCount, kJuliaMaxIterations);
+}
+
+/* SampleBurningShip()/SampleTricorn()/SampleMultibrotConfigurable()
+   All three are Mandelbrot-shaped, not Julia-shaped, like
+   SampleMandelbrot() above: c is the mapped point, z starts at 0.
+   None of them call IsInMainCardioidOrBulb()/Fixed() the way
+   SampleMandelbrot() does - see mwFractalMath.h's own comment on
+   IterateBurningShipDouble()/IterateTricornDouble() and
+   IterateMultibrotDouble() for why those two closed-form tests
+   describe the plain Mandelbrot set specifically and don't apply to
+   any of these differently-shaped sets. All three otherwise share
+   SampleMandelbrot()'s structure exactly, just calling a different
+   Iterate*() pair and shading against kMandelbrotMaxIterations, which
+   kFractalTypes[] (this file) uses as every one of these three types'
+   own ceiling too. */
+static short SampleBurningShip(short x, short y) {
+	short	iterationCount;
+	
+	if (gHasFPU) {
+		double	dRe, dIm;
+		
+		MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &dRe, &dIm);
+		iterationCount = IterateBurningShipDouble(0.0, 0.0, dRe, dIm, currentIterationCeiling);
+	} else {
+		Fixed	fRe, fIm;
+		
+		MapPixelToPlaneFixed(&gRenderMappingFixed, x, y, &fRe, &fIm);
+		iterationCount = IterateBurningShipFixed(0, 0, fRe, fIm, currentIterationCeiling);
+	}
+	
+	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
+}
+
+static short SampleTricorn(short x, short y) {
+	short	iterationCount;
+	
+	if (gHasFPU) {
+		double	dRe, dIm;
+		
+		MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &dRe, &dIm);
+		iterationCount = IterateTricornDouble(0.0, 0.0, dRe, dIm, currentIterationCeiling);
+	} else {
+		Fixed	fRe, fIm;
+		
+		MapPixelToPlaneFixed(&gRenderMappingFixed, x, y, &fRe, &fIm);
+		iterationCount = IterateTricornFixed(0, 0, fRe, fIm, currentIterationCeiling);
+	}
+	
+	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
+}
+
+/* gMultibrotPower/ConfigureMultibrot()
+   gMultibrotPower is the power Multibrot last rendered at (default 3,
+   a reasonable first look - see FractalParameters.md's own guidance),
+   read by SampleMultibrotConfigurable() below every time it samples a
+   pixel. ConfigureMultibrot() is Multibrot's own FractalConfigureProc
+   (see kFractalTypes[]) - shown via ShowParameterDialog()
+   (mwParameterDialog.h) whenever the person picks Multibrot from the
+   Fractal menu, whether or not it was already the current type, so
+   reselecting it is how the power gets changed, not a separate menu
+   item of its own. 2..8 as the allowed range: 2 is just plain
+   Mandelbrot (allowed rather than special-cased away - no real reason
+   to forbid it, and Multibrot's own iteration functions handle it
+   correctly regardless), and above 8 the per-iteration cost - one more
+   full complex multiply per unit of power, on top of everything else -
+   climbs fast for a diminishing visual return; see
+   FractalParameters.md for what different values actually look like. */
+static long gMultibrotPower = 3;
+
+static Boolean ConfigureMultibrot(void) {
+	ParameterField	field;
+	
+	field.kind    = kParameterFieldInteger;
+	field.label   = "Power (n):";
+	field.value   = gMultibrotPower;
+	field.minimum = 2;
+	field.maximum = 8;
+	
+	if (!ShowParameterDialog("Choose the power for z^n + c. See FractalParameters.md for what different values look like.", &field, 1))
+		return false;
+	
+	gMultibrotPower = field.value;
+	return true;
+}
+
+/* GetMultibrotPower()/SetMultibrotPower()
+   See mwWindow.h. SetMultibrotPower() clamps rather than fully
+   validating the way ConfigureMultibrot()'s dialog does - mwSaveAs.c's
+   own load path is the only caller, and a hand-edited or corrupted
+   .frct file with a nonsensical Power: value should still render
+   *something* rather than fail to load at all. The clamp is wider
+   than the dialog's own 2..8 (deliberately - someone hand-editing a
+   file already knows they're past the suggested range) but still
+   real: IterateMultibrotDouble()/Fixed() themselves stay correct for
+   any power>=2, but each unit of power is one more full complex
+   multiply every iteration, every pixel - an unclamped, absurdly
+   large value from a corrupted file wouldn't crash, it would just make
+   the app appear to hang for a very long time. */
+#define kMultibrotMinimumPower	2
+#define kMultibrotMaximumPower	64
+
+long GetMultibrotPower(void) {
+	return gMultibrotPower;
+}
+
+void SetMultibrotPower(long power) {
+	if (power < kMultibrotMinimumPower)
+		power = kMultibrotMinimumPower;
+	else if (power > kMultibrotMaximumPower)
+		power = kMultibrotMaximumPower;
+	
+	gMultibrotPower = power;
+}
+
+static short SampleMultibrotConfigurable(short x, short y) {
+	short	iterationCount;
+	
+	if (gHasFPU) {
+		double	dRe, dIm;
+		
+		MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &dRe, &dIm);
+		iterationCount = IterateMultibrotDouble(0.0, 0.0, dRe, dIm, (short) gMultibrotPower, currentIterationCeiling);
+	} else {
+		Fixed	fRe, fIm;
+		
+		MapPixelToPlaneFixed(&gRenderMappingFixed, x, y, &fRe, &fIm);
+		iterationCount = IterateMultibrotFixed(0, 0, fRe, fIm, (short) gMultibrotPower, currentIterationCeiling);
+	}
+	
+	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
+}
+
+static short SamplePhoenix(short x, short y) {
+	short	iterationCount;
+	
+	if (gHasFPU) {
+		double	dRe, dIm;
+		
+		MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &dRe, &dIm);
+		iterationCount = IteratePhoenixDouble(0.0, 0.0, dRe, dIm, currentIterationCeiling);
+	} else {
+		Fixed	fRe, fIm;
+		
+		MapPixelToPlaneFixed(&gRenderMappingFixed, x, y, &fRe, &fIm);
+		iterationCount = IteratePhoenixFixed(0, 0, fRe, fIm, currentIterationCeiling);
+	}
+	
+	return ShadeLevelForIterationCount(iterationCount, kMandelbrotMaxIterations);
+}
+
+/* gLyapunovSequence/gLyapunovSequenceLength/ConfigureLyapunov()
+   The driving sequence Lyapunov last rendered with (default "AB", the
+   single most commonly shown Lyapunov fractal sequence in the
+   literature - see FractalParameters.md), and Lyapunov's own
+   FractalConfigureProc. Unlike Multibrot's power, this needs its own,
+   fractal-specific validation after ShowParameterDialog() returns -
+   the generic dialog only guarantees non-empty text (see
+   mwParameterDialog.h's own comment on why), so this checks every
+   character is 'A' or 'B' itself, re-showing the dialog with a more
+   specific prompt if not, rather than accepting whatever was typed.
+   Normalises to uppercase on the way in, so "ab" and "AB" are treated
+   the same and always displayed the same way back afterwards. */
+static char  gLyapunovSequence[64] = "AB";
+static short gLyapunovSequenceLength = 2;
+
+static Boolean ConfigureLyapunov(void) {
+	ParameterField	field;
+	const char		*prompt = "Enter a sequence of A's and B's (e.g. AB, AABAB). See FractalParameters.md for what different sequences look like.";
+	
+	field.kind = kParameterFieldText;
+	field.label = "Sequence (A/B):";
+	strcpy(field.text, gLyapunovSequence);
+	
+	for (;;) {
+		short	i;
+		short	length;
+		Boolean	valid = true;
+		
+		if (!ShowParameterDialog(prompt, &field, 1))
+			return false;
+		
+		length = (short) strlen(field.text);
+		if (length == 0)
+			valid = false;
+		
+		for (i = 0; i < length; i++) {
+			char c = field.text[i];
+			if (c >= 'a' && c <= 'z')
+				c -= 32;		/* uppercase - matches this fractal's own display/storage convention */
+			if (c != 'A' && c != 'B') {
+				valid = false;
+				break;
+			}
+			field.text[i] = c;
+		}
+		
+		if (valid) {
+			strcpy(gLyapunovSequence, field.text);
+			gLyapunovSequenceLength = length;
+			return true;
+		}
+		
+		prompt = "Only the letters A and B are allowed - try again (e.g. AB, AABAB).";
+	}
+}
+
+/* SampleLyapunov()
+   The one fractal type in this project that isn't escape-time,
+   convergence, or direct-draw at all: a and b - not c, not z - are
+   what the view actually describes here, reusing gRenderMappingDouble/
+   MapPixelToPlaneDouble() exactly as every other fractal does for its
+   own Re/Im, since the underlying pixel-to-plane mapping is the same
+   linear transform regardless of what the two numbers it produces are
+   then used for. Always double (see IterateLyapunovExponent()'s own
+   comment) - reads gRenderMappingDouble regardless of gHasFPU, which
+   PrepareRenderMapping() always prepares for exactly this reason.
+   
+   The exponent itself is mapped onto the shared 0..kShadingScale range
+   via tanh(), rather than a hard clamp: real Lyapunov fractals show a
+   smooth gradient from strongly stable through borderline to strongly
+   chaotic, not sharply banded regions the way Newton's discrete "which
+   root" categories will - a hard clamp would show flat, saturated
+   colour patches for anything beyond the clamp threshold, where tanh's
+   smooth saturation keeps extreme values visually distinct without
+   letting a few outliers compress the interesting, near-zero boundary
+   region into a handful of shades. kLyapunovShadeScale controls how
+   quickly the mapping saturates - chosen by inspection of this map's
+   typical exponent range for a/b in [2.5,4.0] (a Python port of this
+   exact formula was checked against several well-known reference
+   points - r=2.5 stable, r=3.9 chaotic, r=3.83's well-known periodic
+   window inside the chaotic region correctly stable again - before
+   relying on it here), not derived from a formal bound. */
+#define kLyapunovShadeScale	0.7
+
+static short SampleLyapunov(short x, short y) {
+	double	a, b;
+	double	exponent;
+	double	normalised;
+	short	shadeLevel;
+	
+	MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &a, &b);
+	
+	exponent = IterateLyapunovExponent(a, b, gLyapunovSequence, gLyapunovSequenceLength);
+	
+	normalised = 0.5 + 0.5 * tanh(exponent / kLyapunovShadeScale);
+	shadeLevel = (short) (normalised * kShadingScale);
+	
+	if (shadeLevel < 0)
+		shadeLevel = 0;
+	else if (shadeLevel > kShadingScale)
+		shadeLevel = kShadingScale;
+	
+	return shadeLevel;
+}
+
+/* gNewtonPower/ConfigureNewton()
+   Newton's own power - which power-th roots of unity z^power-1's
+   basins are drawn around - reusing the same dialog and the same
+   2..8 range as Multibrot's own power, for the same reasons given
+   there: a real "enter any n" dialog rather than fixed menu entries,
+   and a range wide enough for real variety without runaway per-pixel
+   cost (each unit of power here costs one more complex multiply per
+   Newton iteration, same as Multibrot, on top of the division every
+   iteration already needs regardless of power). Default 3 - the
+   single most commonly shown Newton fractal (z^3-1) in the
+   literature - see FractalParameters.md. */
+static long gNewtonPower = 3;
+
+/* GetNewtonPower()/SetNewtonPower()
+   See mwWindow.h. Same clamp-not-reject behaviour on load as
+   SetMultibrotPower() - a corrupted or hand-edited .frct file with a
+   nonsensical Power: value should still render something. The clamp's
+   upper bound matters less here than for Multibrot: an unclamped huge
+   power would cost one more complex multiply per Newton iteration
+   (same as Multibrot), on top of the division every Newton iteration
+   already needs regardless of power - the ceiling is about the same
+   order of magnitude as Multibrot's own, not derived independently. */
+#define kNewtonMinimumPower	2
+#define kNewtonMaximumPower	64
+
+long GetNewtonPower(void) {
+	return gNewtonPower;
+}
+
+void SetNewtonPower(long power) {
+	if (power < kNewtonMinimumPower)
+		power = kNewtonMinimumPower;
+	else if (power > kNewtonMaximumPower)
+		power = kNewtonMaximumPower;
+	
+	gNewtonPower = power;
+}
+
+static Boolean ConfigureNewton(void) {
+	ParameterField	field;
+	
+	field.kind    = kParameterFieldInteger;
+	field.label   = "Power (n):";
+	field.value   = gNewtonPower;
+	field.minimum = 2;
+	field.maximum = 8;
+	
+	if (!ShowParameterDialog("Choose the power for z^n - 1 (which roots the basins surround). See FractalParameters.md for what different values look like.", &field, 1))
+		return false;
+	
+	gNewtonPower = field.value;
+	return true;
+}
+
+/* SampleNewton()
+   Not escape-time, statistical, or direct-draw: convergence toward one
+   of z^power-1's own power roots (IterateNewton(), mwNewtonMath.c).
+   Always double, for the same reason SampleLyapunov() is (see
+   IterateNewton()'s own comment on Fixed-point division) - reads
+   gRenderMappingDouble regardless of gHasFPU, exactly as Lyapunov does.
+   
+   Colour encodes two things at once through the single shared
+   0..kShadingScale range every fractal in this project reports on:
+   which root (a discrete category, 0..power-1) as a band of the full
+   range, and how fast this pixel converged (a continuous value) as
+   the shade within that root's own band - the same "band per discrete
+   category, shade within it for a continuous one" idea
+   IsInMainCardioidOrBulb()-style closed-form shortcuts don't need but
+   a convergence fractal's very different colouring problem does. A
+   point that never converges within kNewtonMaxIterations (effectively
+   only ever the z=0 critical point itself, or something numerically
+   indistinguishable from it) gets shade 0 rather than being assigned
+   to any root's band, since it didn't actually reach one. */
+static short SampleNewton(short x, short y) {
+	double	startRe, startIm;
+	double	finalRe, finalIm;
+	short	iterationCount;
+	short	power = (short) gNewtonPower;
+	short	bandWidth;
+	short	rootIndex;
+	short	withinBand;
+	
+	MapPixelToPlaneDouble(&gRenderMappingDouble, x, y, &startRe, &startIm);
+	
+	iterationCount = IterateNewton(startRe, startIm, power, currentIterationCeiling, &finalRe, &finalIm);
+	
+	if (iterationCount >= currentIterationCeiling)
+		return 0;
+	
+	bandWidth  = kShadingScale / power;
+	rootIndex  = NewtonRootIndex(finalRe, finalIm, power);
+	withinBand = (iterationCount < bandWidth) ? iterationCount : (short) (bandWidth - 1);
+	
+	return (short) (rootIndex * bandWidth + withinBand);
 }
 
 /* The colour ramp shadeLevel is mapped onto, in the same direction as
@@ -1181,23 +2026,27 @@ static void DrawIndexedLine(short x1, short y1, short x2, short y2, short colour
    pass here to reduce it for, and this result has to be completely
    correct in one shot since nothing will refine it further. */
 static void DrawFractalDirectly(void) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
+	
 	EraseRect(&imageStart);
 	
-	if (width == 1) {
-		DrawBranchDirectly(windowWidth/2, 0, 90, 9);
-	} else if (width == 2 || width == 3) {
-		FractalSampleProc sampleProc = (width == 2) ? SampleMandelbrot : SampleJulia;
+	if (descriptor == NULL)
+		return;
+	
+	if (descriptor->directDrawDirectProc != NULL) {
+		descriptor->directDrawDirectProc();
+	} else if (descriptor->sampleProc != NULL) {
 		short step = CurrentFinestBlockSize();
 		short x, y;
 		
-		currentIterationCeiling = (width == 2) ? kMandelbrotMaxIterations : kJuliaMaxIterations;
+		currentIterationCeiling = descriptor->maxIterations;
 		PrepareRenderMapping();
 		
 		for (y = 0; y < windowHeight; y += step) {
 			for (x = 0; x < windowWidth; x += step) {
 				Rect cell;
 				SetRect(&cell, x, y, x + step, y + step);
-				ShadeBlock(&cell, sampleProc(x + step/2, y + step/2));
+				ShadeBlock(&cell, descriptor->sampleProc(x + step/2, y + step/2));
 			}
 		}
 	}
@@ -1492,18 +2341,30 @@ unsigned long RenderElapsedTicks(void) {
 }
 
 /* CurrentFractalName()
-   A display name for whatever "width" currently selects. Matches
-   DrawCurrentFractal()-style dispatch elsewhere in this file, just
-   for display rather than drawing. */
+   A display name for whatever "width" currently selects, read from
+   the same kFractalTypes[] table FractalTypeNameForWidth() reads -
+   this used to be its own separate width==1/2/3 chain, one more place
+   a new type's name needed adding by hand. Builds into a static
+   buffer (a Pascal string constant like the old "\pMandelbrot"
+   literals can't hold FractalTypeNameForWidth()'s runtime C string)
+   using the same plain byte-copy AppendCString() (mwInfo.c) uses for
+   the same job - safe here since kFractalTypes[] names are all
+   well under Str255's 255-byte limit. */
 ConstStr255Param CurrentFractalName(void) {
-	if (width == 1)
-		return "\pTree";
-	if (width == 2)
-		return "\pMandelbrot";
-	if (width == 3)
-		return "\pJulia";
+	static Str255	name;
+	const char		*cName = FractalTypeNameForWidth(width);
+	short			i = 0;
 	
-	return "\p(none selected)";
+	if (cName[0] == '\0')
+		return "\p(none selected)";
+	
+	while (cName[i] != '\0' && i < 255) {
+		name[i + 1] = cName[i];
+		i++;
+	}
+	name[0] = i;
+	
+	return name;
 }
 
 /* GetFractalResolution()
@@ -1549,20 +2410,32 @@ long EstimateOffscreenBytesNeeded(short width, short height) {
    field always meant rather than switching to some new unit. */
 FractalParameters GetFractalParameters(void) {
 	FractalParameters params;
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
 	
 	params.zoom          = 0.0;
 	params.maxIterations = 0;
 	params.constantRe    = 0.0;
 	params.constantIm    = 0.0;
 	
-	if (width == 2) {
-		params.zoom          = windowWidth / (2.0 * gView.halfWidthRe);
-		params.maxIterations = kMandelbrotMaxIterations;
-	} else if (width == 3) {
-		params.zoom          = windowWidth / (2.0 * gView.halfWidthRe);
-		params.maxIterations = kJuliaMaxIterations;
-		params.constantRe    = kJuliaConstantRe;
-		params.constantIm    = kJuliaConstantIm;
+	if (descriptor == NULL)
+		return params;
+	
+	if (FractalTypeHasView(width))
+		params.zoom = windowWidth / (2.0 * gView.halfWidthRe);
+	
+	/* maxIterations is meaningful for escape-time AND convergence types
+	   (Newton's own kNewtonMaxIterations really is a per-type ceiling
+	   worth reporting, same as escape-time's) but not Lyapunov
+	   (kFractalFamilyStatistical): its registry row's maxIterations is
+	   a placeholder, since its real iteration counts are fixed inside
+	   mwLyapunovMath.c, not something this per-type field describes.
+	   The constant is escape-time-specific only - Julia's, so far. */
+	if (descriptor->family == kFractalFamilyEscapeTime || descriptor->family == kFractalFamilyConvergence)
+		params.maxIterations = descriptor->maxIterations;
+	
+	if (descriptor->hasFixedConstant) {
+		params.constantRe = descriptor->constantRe;
+		params.constantIm = descriptor->constantIm;
 	}
 	
 	return params;
@@ -1588,7 +2461,8 @@ FractalParameters GetFractalParameters(void) {
    currentIterationCeiling is exactly the fractal's real ceiling -
    unchanged from before this existed. */
 static void UpdateIterationCeilingForBlockSize(short blockSize) {
-	short fullCeiling = (width == 2) ? kMandelbrotMaxIterations : kJuliaMaxIterations;
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
+	short fullCeiling = (descriptor != NULL) ? descriptor->maxIterations : kMandelbrotMaxIterations;
 	short finestSize  = CurrentFinestBlockSize();
 	short reduction   = blockSize / finestSize;
 	short reduced     = fullCeiling / reduction;
@@ -1786,10 +2660,14 @@ Boolean IsRenderingInColour(void) {
 }
 
 /* IsAnimationAvailable()
-   See mwWindow.h. width==1 is the Tree - checked directly here since
-   it's this file's own global (mwMenus.c externs it), and this is
-   exactly the kind of fractal-specific detail that belongs in this
-   file rather than leaking into mwColourCycle.c or mwMenus.c. */
+   See mwWindow.h. Colour animation works the same way for every
+   fractal type, direct-draw or sampled, since they all draw through
+   the same shared indexed-colour/palette machinery - but mono has
+   nothing to animate for a direct-draw type (the Tree; eventually
+   Fern/Sierpinski): those draw lines/points straight via MoveTo()/
+   Line(), with no stored per-pixel shade level the way ShadeBlock()'s
+   own path keeps in gMonoShadeLevels for every sampled fractal, so
+   there's nothing for a "phase" to re-dither against. */
 Boolean IsAnimationAvailable(void) {
 	if (!HasRenderableImage())
 		return false;
@@ -1797,7 +2675,7 @@ Boolean IsAnimationAvailable(void) {
 	if (ShouldRenderInColour())
 		return true;
 	
-	return (gMonoShadeLevels != NULL) && (width != 1);
+	return (gMonoShadeLevels != NULL) && (FractalFamilyForWidth(width) != kFractalFamilyRecursive);
 }
 
 /* RefreshWholeDisplay()
@@ -1912,12 +2790,12 @@ Boolean HasRenderableImage(void) {
    True while zooming - in (mwZoom.c's marquee tracking and keyboard
    zoom) or out (the Zoom Out menu item, and keyboard zoom's other
    direction) - means anything right now: the current fractal (width)
-   must actually have a zoomable view (Mandelbrot or Julia; false for
-   the Tree, which doesn't use gView at all), and something must have
-   been rendered at all (HasRenderableImage()) for a zoom to have
-   anything meaningful to act on. */
+   must actually have a zoomable view (FractalTypeHasView() - true for
+   any family except the Tree's, which doesn't use gView at all), and
+   something must have been rendered at all (HasRenderableImage()) for
+   a zoom to have anything meaningful to act on. */
 Boolean IsZoomAvailable(void) {
-	return (width == 2 || width == 3) && HasRenderableImage();
+	return FractalTypeHasView(width) && HasRenderableImage();
 }
 
 /* StartNewFractal()
@@ -1953,19 +2831,44 @@ void StartNewFractal(void) {
    type this build doesn't have yet fails that one line rather than
    the whole load. */
 const char *FractalTypeNameForWidth(short widthValue) {
-	switch (widthValue) {
-		case 1:  return "Tree";
-		case 2:  return "Mandelbrot";
-		case 3:  return "Julia";
-		default: return "";
-	}
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(widthValue);
+	
+	return (descriptor != NULL) ? descriptor->name : "";
 }
 
 Boolean FindFractalTypeByName(const char *name, short *outWidth) {
-	if (strcmp(name, "Tree") == 0)       { *outWidth = 1; return true; }
-	if (strcmp(name, "Mandelbrot") == 0) { *outWidth = 2; return true; }
-	if (strcmp(name, "Julia") == 0)      { *outWidth = 3; return true; }
+	short i;
+	
+	for (i = 0; i < (short) kFractalTypeCount; i++) {
+		if (strcmp(name, kFractalTypes[i].name) == 0) {
+			*outWidth = kFractalTypes[i].typeID;
+			return true;
+		}
+	}
+	
 	return false;
+}
+
+/* FractalFamilyForWidth()/FractalTypeHasFixedConstant()
+   See their own comments in mwWindow.h. Falls back to
+   kFractalFamilyRecursive/false for kNoFractalSelectedWidth or
+   anything else unrecognised - the same "no descriptor, do the
+   inert thing" fallback DescriptorForWidth()'s own callers already
+   use throughout this file. */
+FractalFamily FractalFamilyForWidth(short widthValue) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(widthValue);
+	
+	return (descriptor != NULL) ? descriptor->family : kFractalFamilyRecursive;
+}
+
+Boolean FractalTypeHasView(short widthValue) {
+	return FractalFamilyForWidth(widthValue) != kFractalFamilyRecursive;
+}
+
+Boolean FractalTypeHasFixedConstant(short widthValue) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(widthValue);
+	
+	return (descriptor != NULL) ? descriptor->hasFixedConstant : false;
 }
 
 /* RebuildOffscreenColourTableForCurrentPalette()
@@ -2182,25 +3085,29 @@ void RenderFractalOffscreen(void) {
     
     EnterOffscreenPort();
     
-	/* The Tree gets a background chosen for contrast against whatever
-	   palette is active (RecursiveFractalBackgroundIndex()) rather
-	   than the plain white every other fractal erases to - mono has
-	   no palette to contrast against, so it keeps the ordinary erase
-	   unchanged. */
-	if (width == 1 && gHasColourQD)
+	/* Every direct-draw type (the Tree; eventually Fern/Sierpinski) gets
+	   a background chosen for contrast against whatever palette is
+	   active (RecursiveFractalBackgroundIndex()) rather than the plain
+	   white every sample-based fractal erases to - mono has no palette
+	   to contrast against, so it keeps the ordinary erase unchanged. */
+	if (FractalFamilyForWidth(width) == kFractalFamilyRecursive && gHasColourQD)
 		FillIndexedRect(&offscreenBounds, RecursiveFractalBackgroundIndex());
 	else
 		EraseRect(&offscreenBounds);
     
-	if (width == 1) {
-		DrawBranch(windowWidth/2, 0, 90, 9);
-		EndRendering();
-	} else if (width == 2) {
-		StartProgressiveRender(SampleMandelbrot);
-	} else if (width == 3) {
-		StartProgressiveRender(SampleJulia);
-	} else {
-		EndRendering();
+	{
+		const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
+		
+		if (descriptor == NULL) {
+			EndRendering();
+		} else if (descriptor->directDrawProc != NULL) {
+			descriptor->directDrawProc();
+			EndRendering();
+		} else if (descriptor->sampleProc != NULL) {
+			StartProgressiveRender(descriptor->sampleProc);
+		} else {
+			EndRendering();
+		}
 	}
     
     SetPort(savedPort);

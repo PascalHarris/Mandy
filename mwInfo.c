@@ -171,9 +171,12 @@ static void BuildTimeLine(Str255 line) {
 }
 
 /* BuildZoomLine()/BuildMaxIterationsLine()/BuildConstantLine()
-   The escape-time maths behind the current fractal - see the
-   FractalParameters comment in mwWindow.h for which of these apply to
-   which fractal. NumToString() only formats whole numbers, so the
+   The maths behind the current fractal - see the FractalParameters
+   comment in mwWindow.h for which of these apply to which fractal.
+   Zoom applies to any type with a view (FractalTypeHasView(), mwWindow.h -
+   Lyapunov included, even though it isn't escape-time); Max Iterations
+   and the constant line are escape-time-specific (Julia's own constant
+   only, so far). NumToString() only formats whole numbers, so the
    floating-point values go through sprintf() (this project already
    links its ANSI library) and AppendCString() instead. */
 static void BuildZoomLine(Str255 line, const FractalParameters *params) {
@@ -296,15 +299,20 @@ void DrawInfoWindowContent(void) {
 	
 	params = GetFractalParameters();
 	
-	if (width == 2 || width == 3) {
+	if (FractalTypeHasView(width)) {
 		BuildZoomLine(line, &params);
-		DrawInfoLine(lineNumber++, line, firstBaseline, lineHeight);
-		
-		BuildMaxIterationsLine(line, &params);
 		DrawInfoLine(lineNumber++, line, firstBaseline, lineHeight);
 	}
 	
-	if (width == 3) {
+	{
+		FractalFamily family = FractalFamilyForWidth(width);
+		if (family == kFractalFamilyEscapeTime || family == kFractalFamilyConvergence) {
+			BuildMaxIterationsLine(line, &params);
+			DrawInfoLine(lineNumber++, line, firstBaseline, lineHeight);
+		}
+	}
+	
+	if (FractalTypeHasFixedConstant(width)) {
 		BuildConstantLine(line, &params);
 		DrawInfoLine(lineNumber++, line, firstBaseline, lineHeight);
 	}

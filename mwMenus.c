@@ -103,23 +103,74 @@ enum {
     quitItem = 9
 };
 
-/* Fractal menu: Tree/Mandelbrot/Julia occupy items 1-3 (their item
-   number is width - see HandleMenu()'s fractalID case); item 4 is a
-   divider; paletteItem is the hierarchical Palette submenu; animateItem
-   is the "Animate"/"Stop Animation" toggle below it - see
-   mwColourCycle.h; zoomOutItem, directly below that, resets gView to
-   the current fractal's own default view - see
-   ResetViewForCurrentFractal()/RestoreDefaultViewFromCache() in
-   mwWindow.h. */
-#define paletteItem	5
-#define animateItem	6
-#define zoomOutItem	7
+/* Fractal menu: built from mwWindow.h's fractal type registry (see
+   SetUpMenus()) rather than a fixed "Tree/Mandelbrot/Julia" string -
+   item numbers no longer equal a type's ID the way they used to (see
+   HandleMenu()'s fractalID case for why that assumption broke the
+   moment a divider needed inserting between family groups), so
+   gFractalMenuItemTypeID[] below is what actually maps a clicked item
+   number back to a type ID, built once as the type list itself is
+   appended. paletteItem/animateItem/zoomOutItem - the hierarchical
+   Palette submenu's anchor, the "Animate"/"Stop Animation" toggle
+   (mwColourCycle.h) below it, and Zoom Out (resets gView to the
+   current fractal's own default view - ResetViewForCurrentFractal()/
+   RestoreDefaultViewFromCache(), mwWindow.h) directly below that -
+   are runtime variables for the same reason: their own item numbers
+   now depend on how many fractal types (and family dividers) came
+   before them, not a fixed count of exactly three. */
+static short	gFractalMenuItemTypeID[20];		/* 0 (kNoFractalSelectedWidth) at a divider's own slot - never matched, since dividers aren't clickable anyway */
+static short	gFractalMenuItemCount = 0;
+static short	paletteItem, animateItem, zoomOutItem;
+
+/* MenuItemForTypeID()
+   The reverse of gFractalMenuItemTypeID[] - which item number a given
+   type currently occupies, or 0 if none does. Must reject
+   kNoFractalSelectedWidth explicitly before searching, not just fall
+   through to "no match": that value doubles as a divider's own
+   placeholder in this same array (see SetUpMenus()), so on the very
+   first fractal ever picked after launch - width is still
+   kNoFractalSelectedWidth at exactly the point HandleMenu() calls this
+   with it - an unguarded search would find the divider's slot and
+   return its item number instead of correctly reporting "no item". */
+static short MenuItemForTypeID(short typeID) {
+	short i;
+	
+	if (typeID == kNoFractalSelectedWidth)
+		return 0;
+	
+	for (i = 0; i < gFractalMenuItemCount; i++) {
+		if (gFractalMenuItemTypeID[i] == typeID)
+			return i + 1;
+	}
+	
+	return 0;
+}
+
+/* BuildPascalString()
+   dst[0..] := src, length-prefixed - a runtime C-to-Pascal-string
+   conversion for AppendMenu(), which needs one but has no reason to
+   require a compile-time "\p" literal specifically; none of this
+   project's fractal type names contain any of AppendMenu()'s own
+   metacharacters (/, ;, !, <, (), so no escaping is needed here the
+   way a fully general menu-string builder would have to do. */
+static void BuildPascalString(Str255 dst, const char *src) {
+	short i = 0;
+	
+	while (src[i] != '\0' && i < 255) {
+		dst[i + 1] = src[i];
+		i++;
+	}
+	dst[0] = i;
+}
 
 
 /* SetUpMenus()
    Set up the menus. Normally, we’d use a resource file, but
    for this example we’ll supply “hardwired” strings. */
 void SetUpMenus(void) {
+    short	i;
+    short	typeCount = FractalTypeCount();
+    
     InsertMenu(appleMenu = NewMenu(appleID, "\p\024"), 0);
     InsertMenu(fileMenu = NewMenu(fileID, "\pFile"), 0);
     InsertMenu(editMenu = NewMenu(editID, "\pEdit"), 0);
@@ -129,7 +180,58 @@ void SetUpMenus(void) {
     AddResMenu(appleMenu, 'DRVR');
     AppendMenu(fileMenu, "\pNew Fractal/N;Open/O;Close/W;(-;Get Info/I;Save as PICT...;Save as Fractal Data...;(-;Quit/Q");
     AppendMenu(editMenu, "\pUndo/Z;(-;Cut/X;Copy/C;Paste/V;Clear");
-    AppendMenu(fractalMenu, "\pTree/T;Mandelbrot/M;Julia/J;(-;Palette;Animate;Zoom Out");
+    
+    /* Fractal menu's type list - one row of kFractalTypes[] (mwWindow.c)
+       at a time, in registry order, with a divider inserted wherever
+       the family changes between one type and the next (registry
+       order is assumed to already group same-family types together -
+       this only detects a *change*, it doesn't sort). Tree, Mandelbrot,
+       and Julia keep their original Cmd-T/M/J shortcuts, applied by
+       type ID right after each is appended rather than baked into an
+       AppendMenu() string - the only way to still assign a specific
+       shortcut once the string itself is built a name at a time rather
+       than as one fixed literal. */
+    for (i = 0; i < typeCount; i++) {
+        short	typeID = FractalTypeIDAtIndex(i);
+        Str255	itemName;
+        
+        if (i > 0 && FractalTypeFamilyAtIndex(i) != FractalTypeFamilyAtIndex(i - 1)) {
+            AppendMenu(fractalMenu, "\p(-");
+            gFractalMenuItemTypeID[gFractalMenuItemCount++] = kNoFractalSelectedWidth;
+        }
+        
+        BuildPascalString(itemName, FractalTypeNameAtIndex(i));
+        
+        /* The standard Mac convention for "this menu item opens a
+           dialog before doing anything" - a trailing ellipsis, MacRoman
+           byte 0xC9 (same \x hex-escape convention this project's own
+           About box already uses for its copyright symbol, \xa9).
+           Appended here, at menu-build time, rather than baked into
+           the type's own name in kFractalTypes[] (mwWindow.c): that
+           name is also what gets saved to and loaded from a .frct file
+           (FractalTypeNameForWidth()/FindFractalTypeByName()), and a
+           literal "..." has no business being part of a saved file's
+           own Type: value. */
+        if (FractalTypeNeedsConfigurationAtIndex(i)) {
+            itemName[0]++;
+            itemName[itemName[0]] = '\xC9';
+        }
+        
+        AppendMenu(fractalMenu, itemName);		/* AppendMenu() takes any valid Pascal string, not only a "\p..." compile-time literal - no placeholder-and-replace needed */
+        gFractalMenuItemTypeID[gFractalMenuItemCount++] = typeID;
+        
+        if (typeID == 1)
+            SetItemCmd(fractalMenu, gFractalMenuItemCount, 'T');
+        else if (typeID == 2)
+            SetItemCmd(fractalMenu, gFractalMenuItemCount, 'M');
+        else if (typeID == 3)
+            SetItemCmd(fractalMenu, gFractalMenuItemCount, 'J');
+    }
+    
+    AppendMenu(fractalMenu, "\p(-;Palette;Animate;Zoom Out");
+    paletteItem = gFractalMenuItemCount + 1;
+    animateItem = gFractalMenuItemCount + 2;
+    zoomOutItem = gFractalMenuItemCount + 3;
     
     /* Palette submenu - see the comment above paletteMenuID. Item
        order in this AppendMenu() string must match kPalettes[] in
@@ -397,9 +499,39 @@ void HandleMenu (long mSelect) {
                     practice, but costs nothing to have here rather
                     than silently falling through if it somehow is. */
              } else {
+                 /* menuItem is a position in the Fractal menu, not a
+                    type ID any more (see gFractalMenuItemTypeID[]'s
+                    own comment for why those parted ways) - look the
+                    real ID up rather than assuming they're still the
+                    same number. CheckItem(..., false) clears whatever
+                    the *previous* width's own item number was - note
+                    that this project has never actually been seen to
+                    call CheckItem(fractalMenu, ..., true) anywhere to
+                    set one in the first place, so in practice this has
+                    likely always been clearing a checkmark that was
+                    never showing; preserved exactly as it already
+                    behaved rather than fixed as part of this change,
+                    since nothing here was asked to touch it. */
+                 short newWidth = gFractalMenuItemTypeID[menuItem - 1];
+                 short previousItem = MenuItemForTypeID(width);
+                 
+                 if (newWidth == kNoFractalSelectedWidth)
+                     break;		/* clicked a divider's own slot - shouldn't be reachable via a real menu click, but do nothing rather than select a nonexistent type if it somehow is */
+                 
+                 /* Multibrot's own item reaches here every time it's
+                    picked, including when it's already the current
+                    type - that's how its power gets changed, rather
+                    than a separate menu item just for reconfiguring.
+                    Cancelling the dialog leaves width, gView, and the
+                    screen exactly as they already were - no partial
+                    switch, no re-render. */
+                 if (!ConfigureFractalTypeIfNeeded(newWidth))
+                     break;
+                 
                  EnsureWindowVisible();
-                 CheckItem(fractalMenu, width, false);
-                 width = menuItem;
+                 if (previousItem != 0)
+                     CheckItem(fractalMenu, previousItem, false);
+                 width = newWidth;
                  ResetViewForCurrentFractal();
                  RenderFractalOffscreen();
                  InvalRect(&mwWindow->portRect);

@@ -7,6 +7,17 @@
 #ifndef _mwWindow_
 #define _mwWindow_
 
+/* width's sentinel for "no fractal type selected yet" - see its own
+   comment in mwWindow.c for the full reasoning. Public because
+   mwMenus.c's own gFractalMenuItemTypeID[] (SetUpMenus()) needs the
+   same value, for a divider's placeholder slot in that table - not
+   because width itself is meant to be compared against this from
+   outside mwWindow.c in general (every other file that cares whether
+   a fractal is selected already has a real function for that -
+   HasRenderableImage(), IsZoomAvailable() - rather than reading width
+   directly). */
+#define kNoFractalSelectedWidth	0
+
 void DrawContent (short active);
 void SetUpWindow(void);
 void RenderFractalOffscreen(void);
@@ -207,6 +218,112 @@ void StartNewFractal(void);
    *outWidth untouched) for a name it doesn't recognise. */
 const char *FractalTypeNameForWidth(short widthValue);
 Boolean FindFractalTypeByName(const char *name, short *outWidth);
+
+/* Which broad kind of fractal a type is - used to group the Fractal
+   menu (mwMenus.c's SetUpMenus() builds it from this, rather than a
+   hand-written string with one entry per type). kFractalFamilyRecursive
+   fractals (the Tree) don't fit the per-pixel sampling model at all and
+   are drawn directly instead - see RenderFractalOffscreen(). Note that
+   family is NOT the same question as "does this type have a zoomable
+   view" (see FractalTypeHasView() below) - Lyapunov is
+   kFractalFamilyStatistical, not escape-time at all, but still has a
+   real view (the a-b plane), just as zoomable as any escape-time
+   type's complex plane. */
+typedef enum {
+	kFractalFamilyRecursive,
+	kFractalFamilyEscapeTime,
+	kFractalFamilyStatistical,
+	kFractalFamilyConvergence
+} FractalFamily;
+
+FractalFamily FractalFamilyForWidth(short widthValue);
+
+/* True for any type that uses gView at all - reusing the same pixel-
+   to-plane mapping infrastructure regardless of what the two numbers
+   it produces are then used for (a complex c or z for escape-time
+   types; a and b for Lyapunov). This used to be answered by checking
+   family == kFractalFamilyEscapeTime directly, in mwSaveAs.c, mwInfo.c,
+   and several functions in this file - which was fine while escape-
+   time was the only family with a view, but stopped being correct the
+   moment Lyapunov arrived: it has just as real a view, on a different
+   plane, without being escape-time. Currently true for every family
+   except kFractalFamilyRecursive (the Tree, which draws a fixed shape
+   with no view at all) - kept as its own named query rather than each
+   caller re-deriving "family != recursive" itself, so a future family
+   that ALSO has no view (if one ever exists) only needs updating here. */
+Boolean FractalTypeHasView(short widthValue);
+
+/* True only for a type with one fixed c the whole image shares (Julia
+   today - width==3 was the literal check mwSaveAs.c/mwInfo.c used
+   before this existed) as opposed to one that varies per pixel
+   (Mandelbrot and its escape-time siblings, where c *is* the point
+   under test) or has no such constant at all (the Tree). Distinct
+   from FractalFamily deliberately: Burning Ship, Tricorn, Multibrot,
+   and Phoenix are all kFractalFamilyEscapeTime but, like Mandelbrot,
+   have no single constant worth reporting - this says which few types
+   actually do, by name, not by family. */
+Boolean FractalTypeHasFixedConstant(short widthValue);
+
+/* Read-only iteration over the fractal type registry (mwWindow.c's
+   kFractalTypes[]), for mwMenus.c's SetUpMenus() to build the Fractal
+   menu's grouped type list from - in registry order, which is also
+   menu order, so a divider belongs wherever FractalTypeFamilyAtIndex()
+   changes between one index and the next. Deliberately a handful of
+   accessors rather than exposing the whole FractalTypeDescriptor
+   array: that struct's sampleProc field is a private implementation
+   detail (FractalSampleProc itself isn't declared here at all), and
+   nothing outside mwWindow.c needs it - a menu only needs a type's ID,
+   name, and family. FractalTypeCount() is how far index may run (0..
+   count-1); the other two are unspecified for anything outside that
+   range. */
+short FractalTypeCount(void);
+short FractalTypeIDAtIndex(short index);
+const char *FractalTypeNameAtIndex(short index);
+FractalFamily FractalTypeFamilyAtIndex(short index);
+
+/* True for a type that needs ShowParameterDialog() (mwParameterDialog.h)
+   before it can actually render - Multibrot's power today, Lyapunov's
+   driving sequence tomorrow. mwMenus.c's SetUpMenus() uses this to
+   decide whether a type's own menu item needs the standard Mac
+   trailing "..." marking "this opens a dialog before doing anything" -
+   generic and automatic for whichever types actually need it, rather
+   than mwMenus.c needing its own separate list to keep in sync with
+   the registry by hand. */
+Boolean FractalTypeNeedsConfigurationAtIndex(short index);
+
+/* Runs widthValue's own configuration step (ShowParameterDialog(),
+   mwParameterDialog.h) if it has one - Multibrot's power today - or
+   does nothing and returns true immediately if it doesn't, so
+   HandleMenu()'s fractalID case (mwMenus.c) can call this
+   unconditionally before switching to any type, parameterized or not,
+   without needing to know which is which itself. False means the
+   person cancelled the dialog - the caller should leave width
+   unchanged and not render, exactly as if the menu click never
+   happened. */
+Boolean ConfigureFractalTypeIfNeeded(short widthValue);
+
+/* Multibrot's own power - see gMultibrotPower/ConfigureMultibrot() in
+   mwWindow.c. Exposed so mwSaveAs.c can round-trip it through a saved
+   .frct file (SetMultibrotPower() on load) the same way gView and the
+   palette already are - without this, reloading a saved Multibrot
+   fractal would silently render at whatever power happens to already
+   be current rather than the one it was actually saved at.
+   SetMultibrotPower() clamps rather than rejecting an out-of-range
+   value - see its own comment in mwWindow.c. Narrow and type-specific
+   rather than a general "every configurable parameter" mechanism:
+   Multibrot is the only type with mutable, saveable configuration
+   state so far, and generalising ahead of Lyapunov/Newton actually
+   needing it risks guessing the wrong shape for something not
+   designed yet. */
+long GetMultibrotPower(void);
+void SetMultibrotPower(long power);
+
+/* Newton's own power - see gNewtonPower/ConfigureNewton() in
+   mwWindow.c. Exposed for the same reason GetMultibrotPower()/
+   SetMultibrotPower() are, and with the same clamp-not-reject
+   behaviour on load. */
+long GetNewtonPower(void);
+void SetNewtonPower(long power);
 
 /* Support for the Palette submenu (mwMenus.c) ------------------------
    A palette only changes what colours the offscreen store's existing

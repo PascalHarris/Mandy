@@ -264,17 +264,34 @@ void SaveFractalData(void) {
 	
 	length += sprintf(buffer + length, "Type: %s\r", FractalTypeNameForWidth(width));
 	
-	if (width == 2 || width == 3) {
+	if (FractalTypeHasView(width)) {
 		length += sprintf(buffer + length, "CentreRe: %.6f\r", gView.centreRe);
 		length += sprintf(buffer + length, "CentreIm: %.6f\r", gView.centreIm);
 		length += sprintf(buffer + length, "HalfWidthRe: %.6f\r", gView.halfWidthRe);
 	}
 	
-	if (width == 3) {
+	if (FractalTypeHasFixedConstant(width)) {
 		params = GetFractalParameters();
 		length += sprintf(buffer + length, "ConstantRe: %.6f\r", params.constantRe);
 		length += sprintf(buffer + length, "ConstantIm: %.6f\r", params.constantIm);
 	}
+	
+	/* Multibrot's and Newton's own power - identified by name, the same
+	   way Type: itself is, rather than a hardcoded type ID: consistent
+	   with why this whole file already avoids width's raw numeric value
+	   wherever a fractal's identity actually matters. Both share the
+	   same Power: key (only one can ever be the current type at once,
+	   so there's no ambiguity in the file itself - see
+	   ApplyFractalDataText()'s own gating on load). Not folded into
+	   FractalTypeHasFixedConstant() above - that flag means "one fixed
+	   value the registry itself already knows", where this is mutable,
+	   user-chosen state living outside the registry entirely (see
+	   GetMultibrotPower()'s/GetNewtonPower()'s own comments in
+	   mwWindow.h). */
+	if (strcmp(FractalTypeNameForWidth(width), "Multibrot") == 0)
+		length += sprintf(buffer + length, "Power: %ld\r", GetMultibrotPower());
+	else if (strcmp(FractalTypeNameForWidth(width), "Newton") == 0)
+		length += sprintf(buffer + length, "Power: %ld\r", GetNewtonPower());
 	
 	length += sprintf(buffer + length, "Palette: %s\r", GetPaletteName(GetCurrentPalette()));
 	
@@ -377,6 +394,8 @@ static void ApplyFractalDataText(char *text) {
 	Boolean	haveView = false;
 	short	paletteIndex = 0;
 	Boolean	havePalette = false;
+	long	power = 0;
+	Boolean	havePower = false;
 	
 	while (*lineStart != '\0') {
 		char	*lineEnd = lineStart;
@@ -414,6 +433,9 @@ static void ApplyFractalDataText(char *text) {
 				halfWidthRe = atof(value);
 			} else if (strcmp(lineStart, "Palette") == 0) {
 				havePalette = FindPaletteByName(value, &paletteIndex);
+			} else if (strcmp(lineStart, "Power") == 0) {
+				power = atol(value);
+				havePower = true;
 			}
 		}
 		
@@ -436,6 +458,21 @@ static void ApplyFractalDataText(char *text) {
 	
 	if (havePalette)
 		SetCurrentPalette(paletteIndex);
+	
+	/* Power: is shared between Multibrot and Newton - both take a
+	   configurable power and both save/load it under the same key (see
+	   SaveFractalData() above), so applying it has to be gated by which
+	   type was actually loaded, not applied unconditionally to one of
+	   them the way it safely could be back when Multibrot was the only
+	   type with a Power: line at all. */
+	if (havePower) {
+		const char *loadedName = FractalTypeNameForWidth(width);
+		
+		if (strcmp(loadedName, "Multibrot") == 0)
+			SetMultibrotPower(power);
+		else if (strcmp(loadedName, "Newton") == 0)
+			SetNewtonPower(power);
+	}
 	
 	EnsureWindowVisible();
 	RenderFractalOffscreen();
