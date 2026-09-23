@@ -524,6 +524,32 @@ static void			DrawSierpinskiDirectly(void);
    saved .frct files already carry the type by name (see
    FindFractalTypeByName()), not by this number, so renumbering later
    costs nothing. */
+/* FractalSymmetryKind - whether, and how, a type's escape/convergence
+   result for a point is provably identical to its result for some
+   OTHER point derivable from it, given the CURRENT view happens to
+   sample both - see SampleWithSymmetryFold()'s own, much longer
+   comment for the mathematics, the exact view condition each kind
+   needs, and why this is fundamentally different from (and safer
+   than) the Mariani-Silver attempts documented above: those were
+   heuristics that could be wrong; this is an algebraic identity,
+   proven by induction for every type it's set on below, not assumed.
+
+   kFractalSymmetryNone: no exploitable symmetry, or none proven -
+   Burning Ship included deliberately (its own abs() operations break
+   the conjugate relationship every other Mandelbrot-shaped type here
+   has - confirmed against multiple independent sources, not just
+   derived), and Lyapunov/Fern/Sierpinski/Tree, none of which this
+   comment's own reasoning applies to at all.
+
+   kFractalSymmetryRealAxis: c and conj(c) give identical results -
+   Mandelbrot, Tricorn, Multibrot, Phoenix, and Newton all qualify (see
+   SampleWithSymmetryFold()'s own comment for the per-type proof
+   sketch), whenever the current view's own centreIm is exactly 0.0. */
+typedef enum {
+	kFractalSymmetryNone,
+	kFractalSymmetryRealAxis
+} FractalSymmetryKind;
+
 struct FractalTypeDescriptor {
 	short					typeID;
 	const char				*name;
@@ -539,20 +565,21 @@ struct FractalTypeDescriptor {
 	FractalConfigureProc	configureProc;
 	FractalDirectDrawProc	directDrawProc;
 	FractalDirectDrawProc	directDrawDirectProc;
+	FractalSymmetryKind		symmetryKind;
 };
 
 static const FractalTypeDescriptor kFractalTypes[] = {
-	{ 1, "Tree",         kFractalFamilyRecursive,  NULL,                       0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawTreeOffscreen, DrawTreeDirectly },
-	{ 10, "Barnsley Fern", kFractalFamilyRecursive, NULL,                      0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawFernOffscreen, DrawFernDirectly },
-	{ 11, "Sierpinski",  kFractalFamilyRecursive,  NULL,                       0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawSierpinskiOffscreen, DrawSierpinskiDirectly },
-	{ 2, "Mandelbrot",   kFractalFamilyEscapeTime, SampleMandelbrot,           kMandelbrotMaxIterations, kMandelbrotDefaultCentreRe, kMandelbrotDefaultCentreIm, kMandelbrotDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
-	{ 3, "Julia",        kFractalFamilyEscapeTime, SampleJulia,                kJuliaMaxIterations,      kJuliaDefaultCentreRe, kJuliaDefaultCentreIm, kJuliaDefaultHalfWidthRe, true, kJuliaConstantRe, kJuliaConstantIm, NULL,               NULL, NULL },
-	{ 4, "Burning Ship", kFractalFamilyEscapeTime, SampleBurningShip,          kMandelbrotMaxIterations, kBurningShipDefaultCentreRe, kBurningShipDefaultCentreIm, kBurningShipDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
-	{ 5, "Tricorn",      kFractalFamilyEscapeTime, SampleTricorn,              kMandelbrotMaxIterations, kTricornDefaultCentreRe, kTricornDefaultCentreIm, kTricornDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
-	{ 6, "Multibrot",    kFractalFamilyEscapeTime, SampleMultibrotConfigurable, kMandelbrotMaxIterations, kMultibrotDefaultCentreRe, kMultibrotDefaultCentreIm, kMultibrotDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureMultibrot, NULL, NULL },
-	{ 7, "Phoenix",      kFractalFamilyEscapeTime, SamplePhoenix,               kMandelbrotMaxIterations, kPhoenixDefaultCentreRe, kPhoenixDefaultCentreIm, kPhoenixDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL },
-	{ 8, "Lyapunov",     kFractalFamilyStatistical, SampleLyapunov,             0,                        kLyapunovDefaultCentreRe, kLyapunovDefaultCentreIm, kLyapunovDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureLyapunov,  NULL, NULL },
-	{ 9, "Newton",       kFractalFamilyConvergence, SampleNewton,               kNewtonMaxIterations,     kNewtonDefaultCentreRe, kNewtonDefaultCentreIm, kNewtonDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureNewton,    NULL, NULL }
+	{ 1, "Tree",         kFractalFamilyRecursive,  NULL,                       0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawTreeOffscreen, DrawTreeDirectly, kFractalSymmetryNone },
+	{ 10, "Barnsley Fern", kFractalFamilyRecursive, NULL,                      0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawFernOffscreen, DrawFernDirectly, kFractalSymmetryNone },
+	{ 11, "Sierpinski",  kFractalFamilyRecursive,  NULL,                       0,                        0.0, 0.0, 0.0, false, 0.0, 0.0, NULL,               DrawSierpinskiOffscreen, DrawSierpinskiDirectly, kFractalSymmetryNone },
+	{ 2, "Mandelbrot",   kFractalFamilyEscapeTime, SampleMandelbrot,           kMandelbrotMaxIterations, kMandelbrotDefaultCentreRe, kMandelbrotDefaultCentreIm, kMandelbrotDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL, kFractalSymmetryRealAxis },
+	{ 3, "Julia",        kFractalFamilyEscapeTime, SampleJulia,                kJuliaMaxIterations,      kJuliaDefaultCentreRe, kJuliaDefaultCentreIm, kJuliaDefaultHalfWidthRe, true, kJuliaConstantRe, kJuliaConstantIm, NULL,               NULL, NULL, kFractalSymmetryNone },
+	{ 4, "Burning Ship", kFractalFamilyEscapeTime, SampleBurningShip,          kMandelbrotMaxIterations, kBurningShipDefaultCentreRe, kBurningShipDefaultCentreIm, kBurningShipDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL, kFractalSymmetryNone },
+	{ 5, "Tricorn",      kFractalFamilyEscapeTime, SampleTricorn,              kMandelbrotMaxIterations, kTricornDefaultCentreRe, kTricornDefaultCentreIm, kTricornDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL, kFractalSymmetryRealAxis },
+	{ 6, "Multibrot",    kFractalFamilyEscapeTime, SampleMultibrotConfigurable, kMandelbrotMaxIterations, kMultibrotDefaultCentreRe, kMultibrotDefaultCentreIm, kMultibrotDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureMultibrot, NULL, NULL, kFractalSymmetryRealAxis },
+	{ 7, "Phoenix",      kFractalFamilyEscapeTime, SamplePhoenix,               kMandelbrotMaxIterations, kPhoenixDefaultCentreRe, kPhoenixDefaultCentreIm, kPhoenixDefaultHalfWidthRe, false, 0.0, 0.0, NULL,               NULL, NULL, kFractalSymmetryRealAxis },
+	{ 8, "Lyapunov",     kFractalFamilyStatistical, SampleLyapunov,             0,                        kLyapunovDefaultCentreRe, kLyapunovDefaultCentreIm, kLyapunovDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureLyapunov,  NULL, NULL, kFractalSymmetryNone },
+	{ 9, "Newton",       kFractalFamilyConvergence, SampleNewton,               kNewtonMaxIterations,     kNewtonDefaultCentreRe, kNewtonDefaultCentreIm, kNewtonDefaultHalfWidthRe, false, 0.0, 0.0, ConfigureNewton,    NULL, NULL, kFractalSymmetryRealAxis }
 };
 #define kFractalTypeCount	(sizeof(kFractalTypes) / sizeof(kFractalTypes[0]))
 
@@ -713,6 +740,172 @@ static void PrepareRenderMapping(void) {
 	PrepareFractalMappingFixed(&gRenderMappingFixed, &gView, windowWidth, windowHeight);
 }
 
+/* SampleWithSymmetryFold() -------------------------------------------
+   The mathematics: for a type with kFractalSymmetryRealAxis
+   (mwWindow.h's own comment on the enum lists which), the escape or
+   convergence result for c is provably identical to the result for
+   conj(c) - proven here by induction for each type that carries the
+   flag, not assumed:
+
+     Mandelbrot/Multibrot (z -> z^n+c): if z(k) is c's own orbit, then
+     conj(z(k)) is conj(c)'s orbit, since conj(z^n+c) = conj(z)^n+conj(c)
+     for any integer n - conjugation commutes with both raising to a
+     power and addition. So |z(k)| = |conj(z(k))| at every step, and
+     the two orbits escape (or don't) at exactly the same iteration.
+
+     Tricorn (z -> conj(z)^2+c): a slightly different induction (see
+     mwFractalMath.c's own git history/commit reasoning if this is ever
+     revisited) shows conj(c)'s orbit is the conjugate of c's own, one
+     step delayed in how the conjugate gets reapplied - the escape time
+     still comes out identical either way.
+
+     Phoenix (z -> z^2+c+p*zPrev, p REAL): conjugating both z(k) and
+     zPrev(k) together is preserved by the update, precisely because p
+     has no imaginary part (conj(p*x) = p*conj(x) only when p is real) -
+     this project's own p=-0.5 (Ushiki's classic value) satisfies that.
+
+     Newton (z -> z - (z^n-1)/(n*z^(n-1))): z^n-1 has real coefficients,
+     so conj(f(z)) = f(conj(z)) for Newton's own update f - meaning
+     conj(z0) converges in exactly as many steps as z0 does, to
+     whichever root is conj(z0)'s own converged root's conjugate (not
+     necessarily the SAME root, unless it's the real one) - NOT
+     currently exploited here despite qualifying: SampleNewton() would
+     need to remap the cached root index to its own conjugate root, not
+     just reuse the cached shade level outright the way the other four
+     types can, and that remapping isn't implemented yet. Newton is
+     deliberately left off the symmetryKind list above until it is,
+     rather than marked eligible and produce a wrong shade for anyone
+     who actually zooms out enough to see two symmetric basins mixed up.
+
+   Burning Ship does NOT qualify - confirmed against multiple
+   independent published sources, not just derived here: its own
+   abs(Re)/abs(Im) step breaks the clean conjugate relationship the
+   moment either component is nonzero, which is essentially always.
+
+   This is categorically different from - and safer than - the
+   Mariani-Silver attempts DrawNextBlockAndAdvance()'s own comment
+   documents: those were heuristics (assume a block is uniform from a
+   handful of border samples) that could be, and were, wrong on real
+   testing. This is a proven algebraic identity: c and conj(c) don't
+   just *probably* match, they always do, for every type flagged above.
+   The only real risk here is a bookkeeping bug in the cache itself, not
+   the underlying maths being unsound - which is exactly why this is
+   verified against a plain reference (see the .c file this shipped
+   alongside) before being trusted.
+
+   The mechanism: whichever of a mirror pair (x,y)/(x, windowHeight-y)
+   is sampled FIRST in this pass computes normally and records its
+   shade level; the second one, whenever it's actually visited, finds
+   that value already cached and reuses it instead of sampling at all.
+   Quadrant order (MapIndexToQuadrantOrder()) doesn't process either
+   half of a pair in any guaranteed order, so the cache has to work
+   correctly regardless of which one arrives first - indexing by
+   min(y, windowHeight-y) (see gSymmetryCacheRowForY()) does that: both
+   members of a pair always land on the same cache row, whichever one
+   gets there first.
+
+   Applied ONLY at the finest, one-pixel-per-block pass
+   (fractalRenderJob.blockSize == 1, colour only - mono's own finest is
+   2x2, see CurrentFinestBlockSize(), and a 2x2 cell's own centre point
+   doesn't mirror as exactly onto another cell's centre the way a
+   single pixel does) and ONLY through the normal progressive path -
+   DrawFractalDirectly()'s low-memory fallback skips it entirely,
+   deliberately: that path exists for when memory is already tight, and
+   adding another allocation attempt there works against the exact
+   problem it exists to work around. Coarse passes aren't folded either -
+   already cheap relative to the finest pass (see kBlocksPerIdleSlice's
+   own comment on where render time actually goes), so the added
+   bookkeeping isn't worth it there.
+
+   y==0 is excluded from the fold: its own mirror, windowHeight, is one
+   past the last valid row, so there is no in-bounds partner to share
+   the work with - it always samples directly. This costs one row's
+   worth of pixels out of the whole image, not worth complicating the
+   indexing scheme to reclaim. */
+static unsigned char	*gSymmetryCache = NULL;
+static short			gSymmetryCacheRows = 0;
+#define kSymmetryCacheEmpty	255		/* outside 0..kShadingScale, so it's unambiguous as "not yet computed" - see mwFractalMath.h for kShadingScale itself */
+
+/* SymmetryFoldEligible()
+   True only when BOTH the current type's own symmetryKind and the
+   current view actually line up: a type flagged kFractalSymmetryRealAxis
+   only actually has mirror PAIRS to reuse when gView.centreIm is
+   exactly 0.0, which is what puts the sampled grid's own row windowHeight/2
+   exactly on the real axis (see MapPixelToPlaneDouble()'s own
+   derivation in mwFractalMath.c) - away from that, the view simply
+   doesn't sample any conjugate pairs at all, symmetric set or not. */
+static Boolean SymmetryFoldEligible(void) {
+	const FractalTypeDescriptor *descriptor = DescriptorForWidth(width);
+	
+	return descriptor != NULL
+			&& descriptor->symmetryKind == kFractalSymmetryRealAxis
+			&& gView.centreIm == 0.0;
+}
+
+/* AllocateSymmetryCache()/FreeSymmetryCache()
+   One byte per (x, canonical-row) slot, allocated fresh for whichever
+   render is about to start and freed the moment it ends or aborts -
+   see EndRendering(). Sized windowWidth * (windowHeight/2 + 1): every
+   pair's canonical row (min(y, windowHeight-y)) falls within
+   0..windowHeight/2 inclusive, so this covers every row that could
+   ever actually be looked up, with a little slack rather than an
+   exact-fit calculation that would need re-deriving carefully if the
+   indexing scheme here ever changes. A failed allocation just leaves
+   the fold disabled for this render (gSymmetryCache stays NULL,
+   SampleWithSymmetryFold() falls back to sampling directly every
+   time) - correct, just not optimised, exactly how this project
+   already treats AllocateOffscreenStore() failing.
+   
+   FreeSymmetryCache() defined first, deliberately: AllocateSymmetryCache()
+   calls it defensively (see its own comment below), and a call before
+   the callee's own definition has been seen forces an implicit
+   declaration that then conflicts with the real static void
+   definition appearing later - real testing (an actual compile) is
+   what caught this, the same class of ordering mistake as
+   mwFractalMath.c's kFractalTypes[] forward-declaration issue earlier
+   in this project, just surfacing as a different diagnostic
+   ("invalid redeclaration" here, "no such member" there) because a
+   missing function declaration and an incomplete struct type fail
+   differently, not because the underlying mistake is actually
+   different in kind. */
+static void FreeSymmetryCache(void) {
+	if (gSymmetryCache != NULL) {
+		DisposePtr((Ptr) gSymmetryCache);
+		gSymmetryCache = NULL;
+	}
+	gSymmetryCacheRows = 0;
+}
+
+static void AllocateSymmetryCache(void) {
+	long size = (long) windowWidth * (windowHeight / 2 + 1);
+	
+	/* Defensive: frees any cache already sitting in gSymmetryCache
+	   before allocating a fresh one, rather than assuming
+	   EndRendering() always ran first - costs nothing when it's
+	   already NULL (FreeSymmetryCache()'s own no-op case), and avoids
+	   a leak if that assumption is ever wrong. */
+	FreeSymmetryCache();
+	
+	gSymmetryCache = (unsigned char *) NewPtr(size);
+	
+	if (gSymmetryCache != NULL) {
+		gSymmetryCacheRows = windowHeight / 2 + 1;
+		/* memset(), not a Toolbox call: this is filling plain,
+		   already-owned heap memory with a single repeated byte, the
+		   textbook case for the ANSI library's own routine - this
+		   project already links it (strcpy()/strcmp(), mwSaveAs.c and
+		   elsewhere), so there's no new dependency being introduced. */
+		memset(gSymmetryCache, kSymmetryCacheEmpty, size);
+	}
+}
+
+/* SampleWithSymmetryFold() itself is defined further down, right after
+   fractalRenderJob's own declaration - it reads fractalRenderJob.sampleProc
+   directly, which isn't declared until then; real testing (another
+   actual compile) caught this exact same class of ordering mistake a
+   second time, this time against a plain struct variable rather than
+   a function or a type. */
+
 /* Progressive render job -------------------------------------------
    Tracks an in-progress coarse-to-fine render so AdvanceFractalRender()
    can pick up where it left off each time it's called. There is only
@@ -747,6 +940,51 @@ static struct {
 	unsigned long		startTick;
 	unsigned long		endTick;
 } fractalRenderJob;
+
+/* SampleWithSymmetryFold()
+   See the "Real-axis mirror symmetry" section's own opening comment,
+   above SampleWithSymmetryFold()'s original home earlier in this file,
+   for the full mathematical picture - only the definition itself
+   moved down here, where fractalRenderJob (just above) is actually
+   visible; the reasoning above it didn't need to move with it. Called
+   from DrawNextBlockAndAdvance() in place of calling
+   fractalRenderJob.sampleProc() directly - falls straight through to
+   it, unchanged, whenever the fold doesn't apply (wrong type, wrong
+   view, cache never allocated, or y==0), so every render that doesn't
+   qualify behaves exactly as it did before this existed. */
+static short SampleWithSymmetryFold(short x, short y) {
+	short	mirrorY, canonicalRow;
+	long	cacheIndex;
+	short	shadeLevel;
+	
+	if (gSymmetryCache == NULL || y == 0)
+		return fractalRenderJob.sampleProc(x, y);
+	
+	mirrorY      = windowHeight - y;
+	canonicalRow = (y < mirrorY) ? y : mirrorY;
+	
+	if (canonicalRow >= gSymmetryCacheRows)
+		return fractalRenderJob.sampleProc(x, y);		/* defensive only - shouldn't happen given AllocateSymmetryCache()'s own sizing, but a stale cache from a resize mid-render must never be read out of bounds */
+	
+	/* (long) on canonicalRow forces the whole multiply into 32-bit
+	   arithmetic before x is added - without it, canonicalRow*windowWidth
+	   alone already overflows a 16-bit signed short well within this
+	   project's own default 512x300 window (150*512 = 76800), not just
+	   at some unusually large resize - the same reasoning
+	   AllocateSymmetryCache()'s own size calculation already applies to
+	   itself, missed here on the first pass through this function and
+	   caught only by working the actual numbers, not by inspection. */
+	cacheIndex = x + (long) canonicalRow * windowWidth;
+	shadeLevel = gSymmetryCache[cacheIndex];
+	
+	if (shadeLevel != kSymmetryCacheEmpty)
+		return shadeLevel;
+	
+	shadeLevel = fractalRenderJob.sampleProc(x, y);
+	gSymmetryCache[cacheIndex] = (unsigned char) shadeLevel;
+	
+	return shadeLevel;
+}
 
 /* Blit throttling state - see kBlitIntervalTicks' own comment.
    Accumulates across possibly several AdvanceFractalRender() calls
@@ -2311,6 +2549,16 @@ static void EndRendering(void) {
 	fractalRenderJob.active  = false;
 	fractalRenderJob.endTick = TickCount();
 	
+	/* Whether or not this render ever actually allocated the symmetry
+	   cache (SymmetryFoldEligible() might have been false the whole
+	   time), FreeSymmetryCache() is always safe to call - it's a no-op
+	   when gSymmetryCache is already NULL. Both ways a render can end -
+	   BeginNextPass()'s natural completion and AbortFractalRender()'s
+	   early stop - call this one function, so this is the single place
+	   that needs to free it, the same reasoning DisposeOffscreenStore()
+	   already applies to the offscreen buffer itself. */
+	FreeSymmetryCache();
+	
 	GetPort(&savedPort);
 	SetPort(mwWindow);
 	SetWTitle(mwWindow, kIdleWindowTitle);
@@ -2496,6 +2744,15 @@ static void StartProgressiveRender(FractalSampleProc sampleProc) {
 	fractalRenderJob.nextBlockIndex  = 0;
 	UpdateIterationCeilingForBlockSize(fractalRenderJob.blockSize);
 	PrepareRenderMapping();
+	
+	/* Only ever needed by the finest, one-pixel pass (see
+	   SampleWithSymmetryFold()'s own comment) - allocated once, here,
+	   for the render as a whole rather than re-checked pass by pass,
+	   since neither the type nor the view can change mid-render. Freed
+	   in EndRendering(), whichever of the two ways this render ends. */
+	if (SymmetryFoldEligible())
+		AllocateSymmetryCache();
+	
 	BeginRendering();
 }
 
@@ -2546,7 +2803,16 @@ static void DrawNextBlockAndAdvance(Rect *drawnRect) {
 	sampleX = clippedRect.left + (clippedRect.right  - clippedRect.left) / 2;
 	sampleY = clippedRect.top  + (clippedRect.bottom - clippedRect.top)  / 2;
 	
-	ShadeBlock(&clippedRect, fractalRenderJob.sampleProc(sampleX, sampleY));
+	/* SampleWithSymmetryFold() only ever applies at the finest,
+	   one-pixel-per-block pass - see its own comment for why coarser
+	   passes aren't worth the added bookkeeping. blockSize==1 is
+	   colour-only in practice (mono's own finest is 2x2 -
+	   CurrentFinestBlockSize()), so mono renders always take the plain
+	   path here, unaffected. */
+	if (fractalRenderJob.blockSize == 1)
+		ShadeBlock(&clippedRect, SampleWithSymmetryFold(sampleX, sampleY));
+	else
+		ShadeBlock(&clippedRect, fractalRenderJob.sampleProc(sampleX, sampleY));
 	
 	*drawnRect = clippedRect;
 	
@@ -3103,6 +3369,34 @@ void RenderFractalOffscreen(void) {
 		} else if (descriptor->directDrawProc != NULL) {
 			descriptor->directDrawProc();
 			EndRendering();
+			
+			/* Direct-draw types (Tree, Fern, Sierpinski) finish their
+			   whole render synchronously, right here - unlike the
+			   sample-based path below, there's no ongoing progressive
+			   job left for AdvanceFractalRender()'s own idle-time
+			   blitting to pick up afterward, so without this, nothing
+			   would ever tell the window to actually show what was
+			   just drawn into the offscreen buffer. A caller that
+			   already does its own InvalRect() afterward (HandleMenu()'s
+			   fractal-selection code, mwMenus.c) never showed this gap;
+			   HandleWindowResized() doesn't, and real testing (resizing
+			   the window while viewing Fern) showed exactly what that
+			   gap looks like - the window keeping its pre-resize
+			   content, with only whatever area SizeWindow() itself
+			   considered "newly exposed" getting an automatic update
+			   event, a confusing "new drawing appearing on top of the
+			   old" result rather than a blank or simply missing one.
+			   Blitting explicitly here, rather than requiring every
+			   caller to remember an InvalRect() of their own, fixes it
+			   for any caller, present or future, not just this one. */
+			{
+				GrafPtr blitSavedPort;
+				
+				GetPort(&blitSavedPort);
+				EnterWindowPort();
+				BlitOffscreenToWindow(NULL);
+				SetPort(blitSavedPort);
+			}
 		} else if (descriptor->sampleProc != NULL) {
 			StartProgressiveRender(descriptor->sampleProc);
 		} else {

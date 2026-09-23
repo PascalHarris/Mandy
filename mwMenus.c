@@ -229,9 +229,16 @@ void SetUpMenus(void) {
     }
     
     AppendMenu(fractalMenu, "\p(-;Palette;Animate;Zoom Out");
-    paletteItem = gFractalMenuItemCount + 1;
-    animateItem = gFractalMenuItemCount + 2;
-    zoomOutItem = gFractalMenuItemCount + 3;
+    /* +1 here is the divider just appended, not Palette itself - easy
+       to miss since AppendMenu()'s "(-" divider syntax reads like part
+       of the string rather than an item in its own right, but Mac
+       menus count it as one; real testing (Pascal running the actual
+       build) is what caught this being off by one, the same way it
+       already caught the struct-completeness bug this file's sibling
+       (mwWindow.c) had. */
+    paletteItem = gFractalMenuItemCount + 2;
+    animateItem = gFractalMenuItemCount + 3;
+    zoomOutItem = gFractalMenuItemCount + 4;
     
     /* Palette submenu - see the comment above paletteMenuID. Item
        order in this AppendMenu() string must match kPalettes[] in
